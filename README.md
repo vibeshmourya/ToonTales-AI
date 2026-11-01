@@ -1,4 +1,4 @@
-# ToonTales AI — Generative AI-Powered Cartoon Storytelling Platform
+# ToonTales AI - Generative AI-Powered Cartoon Storytelling Platform
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Frontend-Streamlit-FF4B4B.svg)](https://streamlit.io/)
