@@ -1,0 +1,31 @@
+# Environment variables & secrets
+.env
+*.env
+.streamlit/secrets.toml
+
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Generated stories & media files (output directories)
+generated_stories/*/
+!generated_stories/.gitkeep
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
