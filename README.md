@@ -1,4 +1,4 @@
-# ToonTales AI — Multi-Provider Generative AI Cartoon Story & Illustration Engine
+# ToonTales AI - Multi-Provider Generative AI Cartoon Story & Illustration Engine
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Frontend-Streamlit-FF4B4B.svg)](https://streamlit.io/)
