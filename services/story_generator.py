@@ -1,7 +1,7 @@
 """
-ToonTales AI - Story Generation Service
-Powered by Google Gemini API via official google-genai SDK.
-Produces structured, consistent cartoon stories with divided scenes and character profiles.
+ToonTales AI — Multi-Provider Story Generation Service
+Orchestrates text generation across Google Gemini, OpenAI, Anthropic Claude, and OpenRouter.
+Enforces character consistency, Pydantic schema validation, and safe error normalization.
 """
 
 import json
@@ -11,12 +11,24 @@ from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 
 from google import genai
-from google.genai import types
-from google.genai.errors import APIError
 
+from services.providers import (
+    get_story_provider,
+    BaseStoryProvider,
+    ProviderError,
+    AuthenticationError,
+    RateLimitError,
+    QuotaExceededError,
+    ModelNotFoundError,
+    CapabilityError,
+    NetworkError,
+    InvalidRequestError
+)
+from services.usage_tracker import UsageTracker
 from utils.helpers import get_config, mask_secret
 
 logger = logging.getLogger("ToonTalesAI.StoryGenerator")
+
 
 
 # =====================================================================
@@ -65,27 +77,32 @@ class StoryModel(BaseModel):
 # =====================================================================
 
 class StoryGeneratorService:
-    def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None):
+    def __init__(
+        self,
+        provider: Optional[str] = None,
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None
+    ):
         """
-        Initialize the story generator with API credentials and model configuration.
+        Initialize the multi-provider story generator.
+        :param provider: 'gemini', 'openai', 'anthropic', 'openrouter'
+        :param api_key: Optional API key override
+        :param model_name: Optional model override
         """
-        self.api_key = api_key or get_config("GEMINI_API_KEY")
-        self.model_name = model_name or get_config("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
-        
-        if not self.api_key:
-            logger.warning("StoryGenerator initialized without API Key. API calls will require explicit key.")
-            self.client = None
-        else:
-            self.client = genai.Client(api_key=self.api_key)
-            logger.info(f"StoryGenerator initialized with model '{self.model_name}' (Key: {mask_secret(self.api_key)})")
+        self.provider_name = (provider or get_config("STORY_PROVIDER", "gemini")).lower()
+        self.api_key = api_key
+        self.model_name = model_name
+        self._provider_instance: Optional[BaseStoryProvider] = None
 
-    def _get_client(self, override_key: Optional[str] = None) -> genai.Client:
-        key = override_key or self.api_key
-        if not key:
-            raise ValueError(
-                "Gemini API Key is missing. Please configure GEMINI_API_KEY in .env or enter it in the app settings."
-            )
-        return genai.Client(api_key=key)
+        logger.info(f"StoryGenerator initialized with provider='{self.provider_name}', model='{self.model_name}'")
+
+    def _get_provider(self, provider_override: Optional[str] = None, api_key_override: Optional[str] = None) -> BaseStoryProvider:
+        p_name = (provider_override or self.provider_name).lower()
+        key = api_key_override or self.api_key
+        prov = get_story_provider(p_name, api_key=key)
+        if p_name == "gemini":
+            prov._client_factory = genai.Client
+        return prov
 
     def generate_story(
         self,
@@ -96,78 +113,41 @@ class StoryGeneratorService:
         art_style: str = "Colorful 2D cartoon",
         num_scenes: int = 5,
         ending_style: str = "Happy",
-        api_key_override: Optional[str] = None
+        api_key_override: Optional[str] = None,
+        provider_override: Optional[str] = None,
+        model_override: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Generate a complete illustrated cartoon story using Google Gemini API.
+        Generates a complete illustrated cartoon story using the configured provider.
         Enforces character visual consistency and strict structured JSON schema.
         """
         if not story_idea or not story_idea.strip():
             raise ValueError("Story idea cannot be empty. Please provide an imaginative concept.")
 
-        client = self._get_client(api_key_override)
-        
+        provider = self._get_provider(provider_override, api_key_override)
+        chosen_model = model_override or self.model_name
+
         logger.info(
-            f"Generating story: '{story_idea[:40]}...' | Genre: {genre} | Age: {target_age} | "
-            f"Scenes: {num_scenes} | Art Style: {art_style}"
-        )
-
-        # Craft system instructions for child-friendly storytelling and character consistency
-        system_instruction = (
-            "You are a master children's cartoon storyteller, animation director, and creative writer for ToonTales AI.\n"
-            "Your objective is to craft an original, captivating, emotionally resonant, and age-appropriate story.\n"
-            "RULES:\n"
-            f"1. Genre: {genre}\n"
-            f"2. Target Audience: {target_age}\n"
-            f"3. Narrative Length: {story_length}\n"
-            f"4. Selected Art Style: {art_style}\n"
-            f"5. Number of Scenes: Exactly {num_scenes} sequential scenes (from scene_number 1 to {num_scenes}).\n"
-            f"6. Ending Style: {ending_style}\n"
-            "7. Character Consistency: For every character, define immutable visual traits (species, colors, body shape, "
-            "costume/clothing, distinctive markings). These traits MUST remain identical across all scenes.\n"
-            "8. Scene Progression: Scene 1 introduces the protagonist and setting. Middle scenes present escalating wonder, "
-            "fun challenges, or discoveries. The final scene delivers a deeply satisfying and conclusive resolution.\n"
-            "9. Visual Detail: Each scene's 'image_prompt' must clearly describe the characters' exact visual appearance, "
-            "their physical poses, emotional facial expressions, specific actions, background environment, and dynamic lighting, "
-            f"matching the '{art_style}' visual style.\n"
-            "10. Safety: Keep all content completely child-safe, positive, engaging, and free of violence or scary elements.\n"
-            "11. Return strictly structured JSON matching the requested schema."
-        )
-
-        user_prompt = (
-            f"Story Idea: {story_idea.strip()}\n\n"
-            f"Please write a complete {num_scenes}-scene cartoon story based on this idea. "
-            f"Ensure exactly {num_scenes} scenes are generated, with an engaging title, character profiles, "
-            f"and detailed visual prompts for each scene."
+            f"Generating story using [{provider.capabilities.name}] | Model: {chosen_model} | "
+            f"Genre: {genre} | Age: {target_age} | Scenes: {num_scenes}"
         )
 
         try:
-            # We configure Gemini using the official google-genai SDK
-            response = client.models.generate_content(
-                model=self.model_name,
-                contents=user_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    response_mime_type="application/json",
-                    response_schema=StoryModel,
-                    temperature=0.75,
-                )
+            story_dict, usage = provider.generate_story(
+                story_idea=story_idea,
+                genre=genre,
+                target_age=target_age,
+                story_length=story_length,
+                art_style=art_style,
+                num_scenes=num_scenes,
+                ending_style=ending_style,
+                model=chosen_model,
+                api_key=api_key_override or self.api_key
             )
 
-            raw_text = response.text
-            if not raw_text or not raw_text.strip():
-                raise ValueError("Received empty response from Gemini API.")
+            # Record usage
+            UsageTracker.record_usage_obj(usage, status="success")
 
-            # Parse and validate with Pydantic
-            try:
-                story_model = StoryModel.model_validate_json(raw_text)
-            except Exception as parse_err:
-                logger.warning(f"Standard JSON validation error: {parse_err}. Attempting sanitization...")
-                cleaned = self._clean_json_markdown(raw_text)
-                story_model = StoryModel.model_validate_json(cleaned)
-
-            story_dict = story_model.model_dump()
-            
             # Post-process: ensure character consistency references are embedded into all image prompts
             story_dict = self.enrich_character_consistency(story_dict)
 
@@ -175,26 +155,22 @@ class StoryGeneratorService:
             if len(story_dict.get("scenes", [])) == 0:
                 raise ValueError("Generated story does not contain any scenes.")
 
+            # Record generation metadata
+            story_dict["story_provider"] = provider.capabilities.name
+            story_dict["story_model"] = chosen_model or provider.capabilities.default_text_model
+
             logger.info(f"Story '{story_dict.get('title')}' successfully generated with {len(story_dict['scenes'])} scenes.")
             return story_dict
 
-        except APIError as api_err:
-            logger.error(f"Gemini API Error: {api_err}")
-            raise RuntimeError(f"Google Gemini API error: {api_err.message if hasattr(api_err, 'message') else str(api_err)}")
         except Exception as e:
-            logger.error(f"Story generation failure: {e}", exc_info=True)
+            UsageTracker.record(
+                provider=provider.capabilities.name,
+                model=chosen_model or provider.capabilities.default_text_model,
+                operation="story",
+                status="failed"
+            )
+            logger.error(f"Story generation failure with provider {provider.capabilities.name}: {e}")
             raise
-
-    @staticmethod
-    def _clean_json_markdown(raw_str: str) -> str:
-        """
-        Strip markdown formatting (e.g. ```json ... ```) if present.
-        """
-        text = raw_str.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
-            text = re.sub(r"\n?```$", "", text)
-        return text.strip()
 
     @staticmethod
     def enrich_character_consistency(story_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -215,7 +191,6 @@ class StoryGeneratorService:
                 clean_name = char_name.strip().lower()
                 matched = characters_map.get(clean_name)
                 if not matched:
-                    # Try partial match
                     for k, v in characters_map.items():
                         if k in clean_name or clean_name in k:
                             matched = v

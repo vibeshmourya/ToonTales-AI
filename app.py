@@ -1,5 +1,5 @@
 """
-ToonTales AI — Generative AI-Powered Cartoon Storytelling Platform
+ToonTales AI - Generative AI-Powered Cartoon Storytelling Platform
 MCA Academic Project
 
 A complete, end-to-end web application that transforms arbitrary story ideas into
@@ -29,6 +29,19 @@ from services.image_generator import (
     ImageNetworkError,
     ImageGenerationError
 )
+from services.providers import (
+    ProviderError,
+    AuthenticationError,
+    RateLimitError,
+    ModelNotFoundError,
+    CapabilityError,
+    NetworkError,
+    get_provider_capabilities,
+    list_story_providers,
+    list_image_providers
+)
+from services.rate_limit_service import RateLimitService
+from services.usage_tracker import UsageTracker, create_usage_summary
 from services.pdf_generator import PDFStorybookGenerator
 from services.narration import NarrationService
 from utils.helpers import (
@@ -271,6 +284,9 @@ if "audio_paths" not in st.session_state:
 if "is_generating_image" not in st.session_state:
     st.session_state.is_generating_image = False
 
+if "story_provider_choice" not in st.session_state:
+    st.session_state.story_provider_choice = get_config("STORY_PROVIDER", "gemini").lower()
+
 if "image_provider_choice" not in st.session_state:
     st.session_state.image_provider_choice = get_config("IMAGE_PROVIDER", "pollinations").lower()
 
@@ -279,120 +295,187 @@ if "last_quota_error" not in st.session_state:
 
 
 # =====================================================================
-# Sidebar: Configuration & Model Settings
+# Sidebar: Configuration & Multi-Provider Settings
 # =====================================================================
 
 with st.sidebar:
     st.markdown("### ⚙️ ToonTales AI Settings")
-    st.caption("Configure Generative AI models & keys")
+    st.caption("Multi-Provider Story & Illustration Engine")
 
-    # API Key Handling
-    env_gemini_key = get_config("GEMINI_API_KEY", "")
-    api_key_input = st.text_input(
-        "Google Gemini API Key",
-        value=env_gemini_key,
-        type="password",
-        help="Get your key at https://aistudio.google.com/. Can also be set in .env file."
+    # -------------------------------------------------------------
+    # 1. STORY GENERATION PROVIDER
+    # -------------------------------------------------------------
+    st.markdown("#### 📖 Story Generator")
+    story_providers = ["gemini", "openai", "anthropic", "openrouter"]
+    story_prov_labels = {
+        "gemini": "Google Gemini",
+        "openai": "OpenAI (GPT-4o)",
+        "anthropic": "Anthropic Claude",
+        "openrouter": "OpenRouter"
+    }
+    current_story_prov = st.session_state.story_provider_choice
+    def_story_prov_idx = story_providers.index(current_story_prov) if current_story_prov in story_providers else 0
+
+    selected_story_provider = st.selectbox(
+        "Story Provider",
+        options=story_providers,
+        index=def_story_prov_idx,
+        format_func=lambda x: story_prov_labels.get(x, x.title()),
+        help="Select the AI provider for writing stories, character profiles, and scene descriptions."
     )
-    active_api_key = api_key_input.strip() if api_key_input else None
+    st.session_state.story_provider_choice = selected_story_provider
 
-    if active_api_key:
-        st.success(f"Key configured: {mask_secret(active_api_key)}")
+    # Dynamic Story Models
+    story_model_presets = {
+        "gemini": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "Custom..."],
+        "openai": ["gpt-4o-mini", "gpt-4o", "gpt-4-turbo", "Custom..."],
+        "anthropic": ["claude-3-5-sonnet-20241022", "claude-3-7-sonnet-20250219", "claude-3-5-haiku-20241022", "claude-3-haiku-20240307", "Custom..."],
+        "openrouter": ["meta-llama/llama-3.3-70b-instruct", "anthropic/claude-3.5-sonnet", "openai/gpt-4o-mini", "google/gemini-2.5-flash", "Custom..."]
+    }
+    avail_story_models = story_model_presets.get(selected_story_provider, ["Custom..."])
+    env_story_model = get_config(f"{selected_story_provider.upper()}_TEXT_MODEL", avail_story_models[0])
+    def_story_model_idx = avail_story_models.index(env_story_model) if env_story_model in avail_story_models else 0
+
+    selected_story_preset = st.selectbox(
+        f"{story_prov_labels[selected_story_provider]} Story Model",
+        options=avail_story_models,
+        index=def_story_model_idx,
+        help="Select the story writing model."
+    )
+    if selected_story_preset == "Custom...":
+        selected_story_model = st.text_input(
+            f"Enter Custom {story_prov_labels[selected_story_provider]} Model ID",
+            value=env_story_model if env_story_model not in avail_story_models else "",
+            placeholder="e.g. model-id"
+        ).strip()
     else:
-        st.warning("⚠️ No Gemini API key detected. Story generation requires Gemini.")
+        selected_story_model = selected_story_preset
+
+    # Story API Key
+    story_env_vars = {
+        "gemini": "GEMINI_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY"
+    }
+    story_env_var = story_env_vars.get(selected_story_provider, "API_KEY")
+    env_story_key = get_config(story_env_var, "")
+    story_key_input = st.text_input(
+        f"{story_prov_labels[selected_story_provider]} API Key",
+        value=env_story_key,
+        type="password",
+        help=f"Configured via {story_env_var} in .env or enter here."
+    )
+    active_story_key = story_key_input.strip() if story_key_input else None
+    active_api_key = active_story_key
+    if active_story_key:
+        st.success(f"Key configured: {mask_secret(active_story_key)}")
+    else:
+        st.warning(f"⚠️ No API key provided for {story_prov_labels[selected_story_provider]}.")
 
     st.markdown("---")
-    st.markdown("#### 🤖 Model Configuration")
 
-    # Gemini Text Model selector
-    text_model_options = [
-        "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash"
-    ]
-    env_text_model = get_config("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
-    default_text_idx = text_model_options.index(env_text_model) if env_text_model in text_model_options else 0
-    selected_text_model = st.selectbox(
-        "Gemini Story Model",
-        options=text_model_options,
-        index=default_text_idx,
-        help="Model used for narrative creation, character design, and scene division."
-    )
-
-    # Image Provider Selector
-    img_provider_options = ["pollinations", "gemini"]
-    current_choice = st.session_state.image_provider_choice
-    default_img_idx = img_provider_options.index(current_choice) if current_choice in img_provider_options else 0
+    # -------------------------------------------------------------
+    # 2. IMAGE GENERATION PROVIDER
+    # -------------------------------------------------------------
+    st.markdown("#### 🎨 Illustration Generator")
+    img_providers = ["pollinations", "gemini", "openai", "openrouter"]
+    img_prov_labels = {
+        "pollinations": "Pollinations AI (Recommended - Zero Cost)",
+        "gemini": "Google Gemini (Multimodal)",
+        "openai": "OpenAI DALL-E",
+        "openrouter": "OpenRouter (Image Models)"
+    }
+    current_img_prov = st.session_state.image_provider_choice
+    def_img_prov_idx = img_providers.index(current_img_prov) if current_img_prov in img_providers else 0
 
     selected_image_provider = st.selectbox(
-        "Image Generation Provider",
-        options=img_provider_options,
-        index=default_img_idx,
-        format_func=lambda x: "Pollinations AI (Recommended - No Billing Required)" if x == "pollinations" else "Google Gemini (Requires Google Cloud Billing)",
+        "Image Provider",
+        options=img_providers,
+        index=def_img_prov_idx,
+        format_func=lambda x: img_prov_labels.get(x, x.title()),
         help=(
-            "Pollinations AI provides free cloud diffusion and works reliably without requiring Google Cloud billing. "
-            "Google Gemini image models require a Pay-As-You-Go Google Cloud project (free-tier image quota is 0)."
+            "Pollinations AI provides free cloud diffusion and works reliably without requiring billing. "
+            "Gemini requires a Pay-As-You-Go project (free-tier image quota is 0). "
+            "OpenAI uses DALL-E. OpenRouter routes to diffusion models."
         )
     )
     st.session_state.image_provider_choice = selected_image_provider
 
-    selected_image_model = "flux"
-    selected_pollinations_model = "flux"
+    # Dynamic Image Models
+    img_model_presets = {
+        "pollinations": ["flux", "turbo", "flux-realism", "flux-anime", "flux-3d"],
+        "gemini": ["gemini-2.5-flash-image", "gemini-3.1-flash-image", "Custom..."],
+        "openai": ["dall-e-3", "dall-e-2", "Custom..."],
+        "openrouter": ["stabilityai/stable-diffusion-xl-base-1.0", "black-forest-labs/flux-1-schnell", "Custom..."]
+    }
+    avail_img_models = img_model_presets.get(selected_image_provider, ["Custom..."])
+    env_img_model = get_config(f"{selected_image_provider.upper()}_IMAGE_MODEL", avail_img_models[0])
+    def_img_model_idx = avail_img_models.index(env_img_model) if env_img_model in avail_img_models else 0
+
+    selected_img_preset = st.selectbox(
+        f"{selected_image_provider.title()} Model",
+        options=avail_img_models,
+        index=def_img_model_idx,
+        help="Select the AI image generation model."
+    )
+    if selected_img_preset == "Custom...":
+        selected_image_model = st.text_input(
+            f"Enter Custom {selected_image_provider.title()} Image Model",
+            value=env_img_model if env_img_model not in avail_img_models else "",
+            placeholder="e.g. model-identifier"
+        ).strip()
+    else:
+        selected_image_model = selected_img_preset
+
+    selected_pollinations_model = selected_image_model if selected_image_provider == "pollinations" else "flux"
+
+    # Image API Key
     active_pollinations_key = None
-
     if selected_image_provider == "pollinations":
-        pol_models = ["flux", "turbo", "flux-realism", "flux-anime", "flux-3d"]
-        env_pol_model = get_config("POLLINATIONS_IMAGE_MODEL", "flux")
-        default_pol_idx = pol_models.index(env_pol_model) if env_pol_model in pol_models else 0
-        selected_pollinations_model = st.selectbox(
-            "Pollinations Model",
-            options=pol_models,
-            index=default_pol_idx,
-            help="Select the AI diffusion model. 'flux' produces the highest quality cartoon artwork."
-        )
-        selected_image_model = selected_pollinations_model
-
         env_pol_key = get_config("POLLINATIONS_API_KEY", "")
         pol_key_input = st.text_input(
             "Pollinations API Key (Optional)",
             value=env_pol_key,
             type="password",
-            help="Optional API key from enter.pollinations.ai/keys. Leave empty to use the zero-cost public tier."
+            help="Optional API key from enter.pollinations.ai/keys. Leave empty to use zero-cost public tier."
         )
         active_pollinations_key = pol_key_input.strip() if pol_key_input else None
+        active_image_key = active_pollinations_key
         if active_pollinations_key:
             st.success(f"Key active: {mask_secret(active_pollinations_key)}")
         else:
             st.caption("ℹ️ Using zero-cost open tier (no key required).")
-
     else:
-        gemini_img_models = [
-            "gemini-2.5-flash-image",
-            "gemini-3.1-flash-image",
-            "Custom..."
-        ]
-        env_img_model = get_config("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
-        default_img_model_idx = gemini_img_models.index(env_img_model) if env_img_model in gemini_img_models else 0
-        
-        chosen_model_preset = st.selectbox(
-            "Gemini Image Model",
-            options=gemini_img_models,
-            index=default_img_model_idx,
-            help="Select a supported Gemini multimodal image generation model."
-        )
-        if chosen_model_preset == "Custom...":
-            selected_image_model = st.text_input(
-                "Enter Custom Gemini Image Model Identifier",
-                value=env_img_model if env_img_model not in ["gemini-2.5-flash-image", "gemini-3.1-flash-image"] else "",
-                placeholder="e.g. gemini-2.5-flash-image"
-            ).strip()
+        # Check if same provider as story
+        if selected_image_provider == selected_story_provider and active_story_key:
+            active_image_key = active_story_key
+            st.caption(f"ℹ️ Reusing configured {story_prov_labels[selected_story_provider]} API key.")
         else:
-            selected_image_model = chosen_model_preset
+            img_env_vars = {
+                "gemini": "GEMINI_API_KEY",
+                "openai": "OPENAI_API_KEY",
+                "openrouter": "OPENROUTER_API_KEY"
+            }
+            img_var = img_env_vars.get(selected_image_provider, "API_KEY")
+            env_img_key = get_config(img_var, "")
+            img_key_input = st.text_input(
+                f"{selected_image_provider.title()} API Key",
+                value=env_img_key,
+                type="password",
+                help=f"Configured via {img_var} in .env or enter here."
+            )
+            active_image_key = img_key_input.strip() if img_key_input else None
+            if active_image_key:
+                st.success(f"Key configured: {mask_secret(active_image_key)}")
+            else:
+                st.warning(f"⚠️ API key required for {selected_image_provider.title()}.")
 
-        st.warning(
-            "⚠️ **Gemini Image Quota Notice:** In Google AI Studio, native image models have 0 free requests. "
-            "A Pay-As-You-Go Google Cloud billing project is required. Switch to 'Pollinations AI' above for free generation."
-        )
+        if selected_image_provider == "gemini":
+            st.warning(
+                "⚠️ **Gemini Image Quota Notice:** Google AI Studio has 0 free-tier image quota. "
+                "A linked Google Cloud Billing project is required. Use 'Pollinations AI' for zero-cost generation."
+            )
 
     st.markdown("---")
     st.markdown("#### 🔊 Audio Narration")
@@ -402,12 +485,31 @@ with st.sidebar:
         help="Converts scene narration into child-friendly speech audio using gTTS."
     )
 
+    # -------------------------------------------------------------
+    # 3. TRANSPARENT USAGE & COST TRACKER
+    # -------------------------------------------------------------
+    with st.expander("📊 AI Usage & Cost Transparency", expanded=False):
+        usage_summary = UsageTracker.get_summary() or create_usage_summary()
+        total_requests = usage_summary.get("total_requests", 0)
+        total_tokens = usage_summary.get("total_tokens", 0)
+        total_images = usage_summary.get("total_images", usage_summary.get("successful_images", 0))
+        failed_images = usage_summary.get("failed_images", 0)
+        estimated_cost = usage_summary.get("estimated_cost_usd", 0.0)
+
+        st.write(f"**Total Requests:** {total_requests}")
+        st.write(f"**Tokens Consumed:** {total_tokens:,}")
+        st.write(f"**Images Generated:** {total_images}")
+        if failed_images > 0:
+            st.write(f"**Failed Image Attempts:** {failed_images}")
+        st.write(f"**Estimated Cost:** ${estimated_cost:.4f}")
+        st.caption("Distinguishes actual reported cost, estimated pricing, and zero-cost calls.")
+
     st.markdown("---")
     st.markdown(
         "<div style='font-size: 0.8rem; color: #64748b; line-height: 1.4;'>"
         "<b>ToonTales AI</b><br/>"
-        "MCA Generative AI Project<br/>"
-        "Powered by Google Gemini Developer API"
+        "Multi-Provider Story & Illustration Engine<br/>"
+        "MCA Generative AI Project"
         "</div>",
         unsafe_allow_html=True
     )
@@ -638,20 +740,23 @@ elif nav_selection == "Home" and st.session_state.story_data is None:
     if submit_button:
         if not story_idea_input.strip():
             st.error("Please enter a story idea before proceeding.")
-        elif selected_image_provider == "gemini" and not active_api_key:
-            st.error("Gemini API Key is required. Please enter your API key in the sidebar.")
+        elif selected_story_provider != "pollinations" and not active_story_key:
+            st.error(f"{selected_story_provider.title()} API Key is required for story generation. Please configure it in the sidebar.")
+        elif selected_image_provider != "pollinations" and not active_image_key:
+            st.error(f"{selected_image_provider.title()} API Key is required for image generation. Please configure it in the sidebar.")
         else:
             # 1. Initialize services
             story_gen = StoryGeneratorService(
-                api_key=active_api_key,
-                model_name=selected_text_model
+                provider=selected_story_provider,
+                api_key=active_story_key,
+                model_name=selected_story_model
             )
             image_gen = ImageGeneratorService(
                 provider=selected_image_provider,
-                api_key=active_api_key,
+                api_key=active_image_key,
                 model_name=selected_image_model,
                 pollinations_api_key=active_pollinations_key,
-                pollinations_model=selected_pollinations_model
+                pollinations_model=selected_image_model if selected_image_provider == "pollinations" else None
             )
             pdf_gen = PDFStorybookGenerator()
             tts_gen = NarrationService()
@@ -666,7 +771,7 @@ elif nav_selection == "Home" and st.session_state.story_data is None:
 
             try:
                 # Step A: Narrative Generation
-                status_box.write("✨ Contacting Google Gemini to craft the original story and scenes...")
+                status_box.write(f"✨ Contacting {story_prov_labels.get(selected_story_provider, selected_story_provider.title())} ({selected_story_model}) to craft original story...")
                 generated_story = story_gen.generate_story(
                     story_idea=story_idea_input,
                     genre=genre_choice,
@@ -675,14 +780,15 @@ elif nav_selection == "Home" and st.session_state.story_data is None:
                     art_style=art_style_choice,
                     num_scenes=num_scenes_choice,
                     ending_style=ending_style_choice,
-                    api_key_override=active_api_key
+                    api_key_override=active_story_key,
+                    model_override=selected_story_model
                 )
                 status_box.write(f"✅ Story crafted: **{generated_story.get('title')}**")
                 status_box.write(f"👥 Characters designed: {len(generated_story.get('characters', []))}")
                 status_box.write(f"🎬 Scenes mapped: {len(generated_story.get('scenes', []))}")
 
                 # Step B: Cartoon Illustrations Generation
-                status_box.write(f"🎨 Generating cartoon illustrations via {selected_image_provider.upper()}...")
+                status_box.write(f"🎨 Generating cartoon illustrations sequentially via {selected_image_provider.upper()} ({selected_image_model})...")
                 
                 prog_bar = status_box.progress(0)
                 def on_image_progress(current, total, msg):
@@ -694,9 +800,10 @@ elif nav_selection == "Home" and st.session_state.story_data is None:
                     story_dict=generated_story,
                     story_dir=story_dir,
                     provider_override=selected_image_provider,
-                    api_key_override=active_api_key,
+                    api_key_override=active_image_key,
+                    model_override=selected_image_model,
                     pollinations_api_key_override=active_pollinations_key,
-                    pollinations_model_override=selected_pollinations_model,
+                    pollinations_model_override=selected_image_model if selected_image_provider == "pollinations" else None,
                     progress_callback=on_image_progress
                 )
 
@@ -794,6 +901,12 @@ if st.session_state.story_data is not None:
     with t_col1:
         st.write("") # spacer
     with t_col2:
+        # Check for missing illustrations and display helpful notice
+        missing_scenes = PDFStorybookGenerator.get_missing_illustrations(story)
+        if missing_scenes:
+            missing_nums = PDFStorybookGenerator.format_missing_scenes(missing_scenes)
+            st.warning(f"⚠️ Note: Scene(s) {missing_nums} have no illustrations yet. You can still download the storybook or generate missing images first.")
+
         # Download PDF Button
         pdf_path = st.session_state.pdf_path
         if pdf_path and os.path.isfile(pdf_path):
@@ -802,7 +915,7 @@ if st.session_state.story_data is not None:
             st.download_button(
                 label="📥 Download Illustrated PDF",
                 data=pdf_bytes,
-                file_name=f"{story.get('title', 'story').replace(' ', '_')}.pdf",
+                file_name=f"{(story.get('title') or 'story').replace(' ', '_')}.pdf",
                 mime="application/pdf",
                 use_container_width=True
             )
@@ -819,10 +932,17 @@ if st.session_state.story_data is not None:
     main_col, side_col = st.columns([7, 3])
 
     with main_col:
-        # Scene Progress Navigation Bar
+        # Scene Progress Navigation Bar & Status Standardization
         img_status = curr_scene.get("illustration_status")
-        if not img_status:
-            img_status = "Generated" if (curr_scene.get("image_path") and os.path.isfile(curr_scene.get("image_path", ""))) else "Pending"
+        img_path = curr_scene.get("image_path")
+        has_valid_img = bool(
+            img_path and isinstance(img_path, str) and os.path.isfile(img_path) and os.path.getsize(img_path) > 0
+        )
+        if img_status == "Generated" and not has_valid_img:
+            img_status = "Pending"
+            curr_scene["illustration_status"] = img_status
+        elif not img_status:
+            img_status = "Generated" if has_valid_img else "Pending"
             curr_scene["illustration_status"] = img_status
 
         status_badge_map = {
@@ -830,6 +950,8 @@ if st.session_state.story_data is not None:
             "Pending": ("#fef3c7", "#b45309", "⏳ Illustration Pending"),
             "Generating": ("#e0e7ff", "#4338ca", "🔄 Generating..."),
             "Failed": ("#fee2e2", "#b91c1c", "❌ Illustration Failed"),
+            "Waiting for cooldown": ("#ffedd5", "#c2410c", "⏱️ Waiting for Cooldown"),
+            "Outdated": ("#f3e8ff", "#7e22ce", "⚠️ Description Edited (Outdated)"),
         }
         bg_c, txt_c, badge_lbl = status_badge_map.get(img_status, ("#f1f5f9", "#475569", img_status))
 
@@ -952,11 +1074,12 @@ if st.session_state.story_data is not None:
                     curr_scene["narration"] = edit_narration.strip()
                     curr_scene["environment"] = edit_env.strip()
                     curr_scene["image_prompt"] = f"{edit_narration.strip()[:200]}, set in {edit_env.strip()}."
-                    curr_scene["illustration_status"] = "Pending"
+                    has_img = bool(curr_scene.get("image_path") and os.path.isfile(curr_scene.get("image_path", "")))
+                    curr_scene["illustration_status"] = "Outdated" if has_img else "Pending"
                     curr_scene["illustration_error"] = None
                     if st.session_state.story_dir:
                         save_story_json(story, os.path.join(st.session_state.story_dir, "story.json"))
-                    st.success(f"Scene {curr_idx + 1} updated and marked as 'Pending'!")
+                    st.success(f"Scene {curr_idx + 1} updated and marked as '{curr_scene['illustration_status']}'!")
                     st.rerun()
 
         st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
@@ -984,10 +1107,10 @@ if st.session_state.story_data is not None:
                     try:
                         img_service = ImageGeneratorService(
                             provider=selected_image_provider,
-                            api_key=active_api_key,
+                            api_key=active_image_key,
                             model_name=selected_image_model,
                             pollinations_api_key=active_pollinations_key,
-                            pollinations_model=selected_pollinations_model
+                            pollinations_model=selected_image_model if selected_image_provider == "pollinations" else None
                         )
                         dest_file = os.path.join(
                             st.session_state.story_dir, f"scene_{scene_num:02d}.png"
@@ -998,9 +1121,10 @@ if st.session_state.story_data is not None:
                             art_style=story.get("art_style", "Colorful 2D cartoon"),
                             output_filepath=dest_file,
                             provider_override=selected_image_provider,
-                            api_key_override=active_api_key,
+                            api_key_override=active_image_key,
+                            model_override=selected_image_model,
                             pollinations_api_key_override=active_pollinations_key,
-                            pollinations_model_override=selected_pollinations_model
+                            story_id=st.session_state.story_id or "default_story"
                         )
                         # Update current scene image and status
                         curr_scene["image_path"] = new_img_path
@@ -1016,17 +1140,25 @@ if st.session_state.story_data is not None:
                         st.success(f"Scene {curr_idx + 1} illustration updated!")
                         st.rerun()
                     except QuotaExceededError as q_err:
-                        curr_scene["illustration_status"] = "Failed"
+                        is_zero = getattr(q_err, "is_zero_quota", False)
+                        curr_scene["illustration_status"] = "Failed" if is_zero else "Waiting for cooldown"
                         curr_scene["illustration_error"] = str(q_err)
                         save_story_json(story, os.path.join(st.session_state.story_dir, "story.json"))
                         st.error(f"⚠️ Quota Exceeded: {str(q_err)}")
-                        if getattr(q_err, "is_zero_quota", False):
+                        if is_zero:
                             st.info(
                                 "💡 **How to resolve:** Google AI Studio requires a linked Google Cloud Billing (Pay-As-You-Go) "
                                 "project to use native Gemini image models. Switch the Image Generation Provider to "
                                 "**'Pollinations AI'** in the sidebar settings (or click the button above) for zero-cost cartoon generation."
                             )
                         logger.warning(f"Regeneration quota error: {q_err}")
+                    except RateLimitError as rl_err:
+                        is_quota_exhausted = getattr(rl_err, "is_quota_exhausted", False)
+                        curr_scene["illustration_status"] = "Failed" if is_quota_exhausted else "Waiting for cooldown"
+                        curr_scene["illustration_error"] = str(rl_err)
+                        save_story_json(story, os.path.join(st.session_state.story_dir, "story.json"))
+                        st.error(f"⏱️ Rate Limit / Cooldown: {str(rl_err)}")
+                        logger.warning(f"Regeneration rate limit error: {rl_err}")
                     except InvalidAPIKeyError as key_err:
                         curr_scene["illustration_status"] = "Failed"
                         curr_scene["illustration_error"] = str(key_err)
@@ -1076,16 +1208,26 @@ if st.session_state.story_data is not None:
         st.caption("Visual attributes preserved across all scenes")
 
         for ch in story.get("characters", []):
+            if isinstance(ch, dict):
+                c_name = ch.get('name', 'Character')
+                c_role = ch.get('role', 'Character')
+                c_appearance = ch.get('appearance', '')
+                c_personality = ch.get('personality', '')
+            else:
+                c_name = str(ch)
+                c_role = "Character"
+                c_appearance = ""
+                c_personality = ""
             st.markdown(
                 f"""
                 <div class="character-card">
-                    <div class="character-name">{ch.get('name', 'Character')}</div>
-                    <div class="character-role">{ch.get('role', 'Character')}</div>
+                    <div class="character-name">{c_name}</div>
+                    <div class="character-role">{c_role}</div>
                     <div style="font-size: 0.88rem; color: #334155; margin-top: 6px;">
-                        <b>Visuals:</b> {ch.get('appearance', '')}
+                        <b>Visuals:</b> {c_appearance}
                     </div>
                     <div style="font-size: 0.85rem; color: #64748b; margin-top: 4px;">
-                        <b>Traits:</b> {ch.get('personality', '')}
+                        <b>Traits:</b> {c_personality}
                     </div>
                 </div>
                 """,
@@ -1099,4 +1241,6 @@ if st.session_state.story_data is not None:
                 curr_scene.get("enriched_image_prompt", curr_scene.get("image_prompt", "")),
                 language="text"
             )
-            st.caption("Characters present: " + ", ".join(curr_scene.get("characters_present", ["None"])))
+            raw_chars = curr_scene.get("characters_present")
+            chars_display = ", ".join(str(c) for c in raw_chars) if isinstance(raw_chars, list) and raw_chars else "None"
+            st.caption("Characters present: " + chars_display)

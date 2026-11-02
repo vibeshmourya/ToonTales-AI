@@ -8,7 +8,7 @@ and page numbering.
 import os
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from PIL import Image as PILImage
 
 from reportlab.lib.pagesizes import letter
@@ -106,6 +106,64 @@ class PDFStorybookGenerator:
         doc.build(story_elements, canvasmaker=NumberedCanvas)
         logger.info(f"Illustrated PDF storybook created successfully at: {dest.name}")
         return str(dest)
+
+    @staticmethod
+    def get_missing_illustrations(story_data: Any) -> List[int]:
+        """
+        Returns a list of scene numbers that lack a valid image on disk.
+        Does not trigger any API calls.
+        Safely handles None, non-dict story_data, non-dict scenes, or missing keys.
+        """
+        if not isinstance(story_data, dict):
+            return []
+        missing: List[int] = []
+        for idx, scene in enumerate(story_data.get("scenes", []) or []):
+            if not isinstance(scene, dict):
+                if isinstance(scene, int):
+                    missing.append(scene)
+                continue
+            s_num = scene.get("scene_number")
+            if s_num is None or not isinstance(s_num, (int, str)):
+                s_num = idx + 1
+            else:
+                try:
+                    s_num = int(s_num)
+                except (ValueError, TypeError):
+                    s_num = idx + 1
+            img_path = scene.get("image_path")
+            if not img_path or not isinstance(img_path, str) or not os.path.isfile(img_path) or os.path.getsize(img_path) == 0:
+                missing.append(s_num)
+        return missing
+
+    @staticmethod
+    def format_missing_scenes(missing_scenes: Any) -> str:
+        """
+        Formats a collection of missing scenes into a clean comma-separated string of scene numbers.
+        Robustly supports:
+        - List of integers: [3, 4, 5] -> "3, 4, 5"
+        - List of scene dictionaries: [{"scene_number": 3}, ...] -> "3, ..."
+        - Dictionaries with 'scene_id' -> "3, ..."
+        - Missing or None scene numbers -> "?"
+        - Empty lists, None, or unexpected types -> ""
+        """
+        if not missing_scenes or not isinstance(missing_scenes, (list, tuple, set)):
+            return ""
+
+        formatted: List[str] = []
+        for item in missing_scenes:
+            if isinstance(item, int):
+                formatted.append(str(item))
+            elif isinstance(item, str):
+                s = item.strip()
+                formatted.append(s if s else "?")
+            elif isinstance(item, dict):
+                val = item.get("scene_number")
+                if val is None:
+                    val = item.get("scene_id")
+                formatted.append(str(val) if val is not None and str(val).strip() else "?")
+            else:
+                formatted.append("?")
+        return ", ".join(formatted)
 
     def _setup_custom_styles(self, styles):
         """
