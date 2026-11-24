@@ -220,13 +220,9 @@ class OpenAIProvider(BaseStoryProvider, BaseImageProvider):
             if not raw_text:
                 raise InvalidRequestError("Received empty response from OpenAI.", provider="openai")
 
-            try:
-                story_model = StoryModel.model_validate_json(raw_text)
-            except Exception:
-                cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", raw_text.strip())
-                cleaned = re.sub(r"\n?```$", "", cleaned).strip()
-                story_model = StoryModel.model_validate_json(cleaned)
-
+            from services.json_repair import parse_and_repair_json
+            parsed_data = parse_and_repair_json(raw_text)
+            story_model = StoryModel.model_validate(parsed_data)
             story_dict = story_model.model_dump()
             return story_dict, usage
 

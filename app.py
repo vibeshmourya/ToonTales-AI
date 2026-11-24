@@ -303,6 +303,41 @@ with st.sidebar:
     st.caption("Multi-Provider Story & Illustration Engine")
 
     # -------------------------------------------------------------
+    # 0. SAVED STORY LIBRARY (Quick Session Restore)
+    # -------------------------------------------------------------
+    with st.expander("📂 Saved Story Library", expanded=False):
+        saved_stories = []
+        gen_dir = Path(BASE_DIR) / "generated_stories"
+        if gen_dir.is_dir():
+            for p in sorted(gen_dir.iterdir(), key=lambda x: x.stat().st_mtime if x.is_dir() else 0, reverse=True):
+                if p.is_dir() and (p / "story.json").is_file():
+                    saved_stories.append(p.name)
+        if saved_stories:
+            chosen_saved = st.selectbox("Select Saved Story", saved_stories, index=0)
+            if st.button("📖 Load Story", use_container_width=True, key="load_saved_story_sidebar"):
+                story_file = gen_dir / chosen_saved / "story.json"
+                loaded = load_story_json(str(story_file))
+                if loaded:
+                    st.session_state.story_data = loaded
+                    st.session_state.story_id = chosen_saved
+                    st.session_state.story_dir = str(gen_dir / chosen_saved)
+                    st.session_state.pdf_path = str(gen_dir / chosen_saved / "story.pdf")
+                    # Check audio files
+                    audio_map = {}
+                    for sc in (loaded.get("scenes", []) or []):
+                        if isinstance(sc, dict):
+                            sn = sc.get("scene_number", 1)
+                            af = os.path.join(str(gen_dir / chosen_saved), f"scene_{sn:02d}.mp3")
+                            if os.path.isfile(af):
+                                audio_map[sn] = af
+                    st.session_state.audio_paths = audio_map
+                    st.session_state.current_scene_idx = 0
+                    st.success(f"Loaded '{loaded.get('title', chosen_saved)}'!")
+                    st.rerun()
+        else:
+            st.caption("No previously generated stories found.")
+
+    # -------------------------------------------------------------
     # 1. STORY GENERATION PROVIDER
     # -------------------------------------------------------------
     st.markdown("#### 📖 Story Generator")
@@ -490,17 +525,22 @@ with st.sidebar:
     # -------------------------------------------------------------
     with st.expander("📊 AI Usage & Cost Transparency", expanded=False):
         usage_summary = UsageTracker.get_summary() or create_usage_summary()
+        if not isinstance(usage_summary, dict):
+            usage_summary = create_usage_summary()
         total_requests = usage_summary.get("total_requests", 0)
         total_tokens = usage_summary.get("total_tokens", 0)
         total_images = usage_summary.get("total_images", usage_summary.get("successful_images", 0))
         failed_images = usage_summary.get("failed_images", 0)
         estimated_cost = usage_summary.get("estimated_cost_usd", 0.0)
+        cache_hits = usage_summary.get("cache_hits", 0)
 
         st.write(f"**Total Requests:** {total_requests}")
         st.write(f"**Tokens Consumed:** {total_tokens:,}")
         st.write(f"**Images Generated:** {total_images}")
         if failed_images > 0:
             st.write(f"**Failed Image Attempts:** {failed_images}")
+        if cache_hits > 0:
+            st.write(f"**Deduplicated / Cache Hits:** {cache_hits}")
         st.write(f"**Estimated Cost:** ${estimated_cost:.4f}")
         st.caption("Distinguishes actual reported cost, estimated pricing, and zero-cost calls.")
 
@@ -864,19 +904,60 @@ elif nav_selection == "Home" and st.session_state.story_data is None:
 
 if st.session_state.story_data is not None:
     story = st.session_state.story_data
-    scenes = story.get("scenes", [])
+    if not isinstance(story, dict):
+        story = {}
+        st.session_state.story_data = story
+
+    raw_scenes = story.get("scenes", [])
+    if not isinstance(raw_scenes, list):
+        raw_scenes = []
+
+    # Safe normalization of all scenes to guaranteed dicts
+    scenes = []
+    for idx, sc in enumerate(raw_scenes):
+        if isinstance(sc, dict):
+            sc.setdefault("scene_number", idx + 1)
+            sc.setdefault("heading", sc.get("scene_title") or f"Scene {idx + 1}")
+            sc.setdefault("narration", sc.get("narrative_text") or "")
+            sc.setdefault("environment", sc.get("setting") or "")
+            sc.setdefault("illustration_status", "Pending")
+            scenes.append(sc)
+        else:
+            scenes.append({
+                "scene_number": idx + 1,
+                "heading": f"Scene {idx + 1}",
+                "narration": str(sc),
+                "environment": "",
+                "image_prompt": str(sc),
+                "illustration_status": "Pending"
+            })
+    story["scenes"] = scenes
+
     total_scenes = len(scenes)
     curr_idx = st.session_state.current_scene_idx
 
     # Clamp index safely
-    if curr_idx >= total_scenes:
-        curr_idx = total_scenes - 1
-        st.session_state.current_scene_idx = curr_idx
-    if curr_idx < 0:
+    if total_scenes == 0:
+        curr_scene = {
+            "scene_number": 1,
+            "heading": "Scene 1",
+            "narration": "No scenes available.",
+            "environment": "",
+            "image_prompt": "",
+            "illustration_status": "Pending"
+        }
+        scenes = [curr_scene]
+        total_scenes = 1
         curr_idx = 0
         st.session_state.current_scene_idx = 0
-
-    curr_scene = scenes[curr_idx]
+    else:
+        if curr_idx >= total_scenes:
+            curr_idx = total_scenes - 1
+            st.session_state.current_scene_idx = curr_idx
+        if curr_idx < 0:
+            curr_idx = 0
+            st.session_state.current_scene_idx = 0
+        curr_scene = scenes[curr_idx]
 
     # --- Storybook Header Bar ---
     st.markdown(
@@ -907,8 +988,19 @@ if st.session_state.story_data is not None:
             missing_nums = PDFStorybookGenerator.format_missing_scenes(missing_scenes)
             st.warning(f"⚠️ Note: Scene(s) {missing_nums} have no illustrations yet. You can still download the storybook or generate missing images first.")
 
-        # Download PDF Button
+        # Download PDF Button (100% API-free and auto-generated from local data if missing)
         pdf_path = st.session_state.pdf_path
+        if not pdf_path and st.session_state.story_dir:
+            pdf_path = os.path.join(st.session_state.story_dir, "story.pdf")
+            st.session_state.pdf_path = pdf_path
+
+        if pdf_path and not os.path.isfile(pdf_path) and story:
+            try:
+                pdf_gen = PDFStorybookGenerator()
+                pdf_gen.generate_pdf(story, pdf_path)
+            except Exception as e:
+                logger.warning(f"Could not auto-generate missing PDF: {e}")
+
         if pdf_path and os.path.isfile(pdf_path):
             with open(pdf_path, "rb") as f:
                 pdf_bytes = f.read()
@@ -1025,8 +1117,11 @@ if st.session_state.story_data is not None:
                         curr_scene["illustration_status"] = "Generated"
                         curr_scene["illustration_error"] = None
                         
-                        pdf_svc = PDFStorybookGenerator()
-                        pdf_svc.generate_pdf(story, st.session_state.pdf_path)
+                        if not st.session_state.pdf_path and st.session_state.story_dir:
+                            st.session_state.pdf_path = os.path.join(st.session_state.story_dir, "story.pdf")
+                        if st.session_state.pdf_path:
+                            pdf_svc = PDFStorybookGenerator()
+                            pdf_svc.generate_pdf(story, st.session_state.pdf_path)
                         save_story_json(story, os.path.join(st.session_state.story_dir, "story.json"))
                         st.success(f"Scene {curr_idx + 1} illustration generated via Pollinations AI!")
                         st.rerun()
@@ -1071,9 +1166,14 @@ if st.session_state.story_data is not None:
                 save_scene_btn = st.form_submit_button("💾 Save Description & Mark Pending")
                 if save_scene_btn:
                     curr_scene["heading"] = edit_heading.strip()
+                    curr_scene["scene_title"] = edit_heading.strip()
                     curr_scene["narration"] = edit_narration.strip()
+                    curr_scene["narrative_text"] = edit_narration.strip()
                     curr_scene["environment"] = edit_env.strip()
+                    curr_scene["setting"] = edit_env.strip()
                     curr_scene["image_prompt"] = f"{edit_narration.strip()[:200]}, set in {edit_env.strip()}."
+                    curr_scene["illustration_prompt"] = curr_scene["image_prompt"]
+                    curr_scene["enriched_image_prompt"] = None
                     has_img = bool(curr_scene.get("image_path") and os.path.isfile(curr_scene.get("image_path", "")))
                     curr_scene["illustration_status"] = "Outdated" if has_img else "Pending"
                     curr_scene["illustration_error"] = None
@@ -1132,8 +1232,11 @@ if st.session_state.story_data is not None:
                         curr_scene["illustration_error"] = None
                         
                         # Re-generate PDF to incorporate new image
-                        pdf_svc = PDFStorybookGenerator()
-                        pdf_svc.generate_pdf(story, st.session_state.pdf_path)
+                        if not st.session_state.pdf_path and st.session_state.story_dir:
+                            st.session_state.pdf_path = os.path.join(st.session_state.story_dir, "story.pdf")
+                        if st.session_state.pdf_path:
+                            pdf_svc = PDFStorybookGenerator()
+                            pdf_svc.generate_pdf(story, st.session_state.pdf_path)
                         # Save updated story JSON
                         save_story_json(story, os.path.join(st.session_state.story_dir, "story.json"))
                         st.session_state.is_generating_image = False

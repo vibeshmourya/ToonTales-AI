@@ -195,18 +195,9 @@ class OpenRouterProvider(BaseStoryProvider, BaseImageProvider):
                 cost_type="estimated"
             )
 
-            cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", raw_text.strip())
-            cleaned = re.sub(r"\n?```$", "", cleaned).strip()
-
-            try:
-                story_model = StoryModel.model_validate_json(cleaned)
-            except Exception:
-                match = re.search(r'(\{[\s\S]*\})', cleaned)
-                if match:
-                    story_model = StoryModel.model_validate_json(match.group(1))
-                else:
-                    raise InvalidRequestError("Failed to parse OpenRouter response into valid Story JSON.", provider="openrouter")
-
+            from services.json_repair import parse_and_repair_json
+            parsed_data = parse_and_repair_json(raw_text)
+            story_model = StoryModel.model_validate(parsed_data)
             story_dict = story_model.model_dump()
             return story_dict, usage
 

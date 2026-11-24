@@ -230,20 +230,9 @@ class AnthropicProvider(BaseStoryProvider):
             if not raw_text:
                 raise InvalidRequestError("Received empty response from Anthropic Claude.", provider="anthropic")
 
-            # Extract JSON if enclosed in markdown
-            cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", raw_text.strip())
-            cleaned = re.sub(r"\n?```$", "", cleaned).strip()
-
-            try:
-                story_model = StoryModel.model_validate_json(cleaned)
-            except Exception as parse_err:
-                # Try finding outermost JSON curly braces
-                match = re.search(r'(\{[\s\S]*\})', cleaned)
-                if match:
-                    story_model = StoryModel.model_validate_json(match.group(1))
-                else:
-                    raise InvalidRequestError(f"Failed to parse Claude output into valid Story JSON: {parse_err}", provider="anthropic")
-
+            from services.json_repair import parse_and_repair_json
+            parsed_data = parse_and_repair_json(raw_text)
+            story_model = StoryModel.model_validate(parsed_data)
             story_dict = story_model.model_dump()
             return story_dict, usage
 

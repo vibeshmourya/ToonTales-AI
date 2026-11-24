@@ -132,46 +132,89 @@ class ImageGeneratorService:
         art_style: str = "Colorful 2D cartoon"
     ) -> str:
         """
-        Constructs an optimized visual prompt for the image generation model.
-        Incorporates art style, environment, persistent character traits, and scene action.
+        Constructs an optimized, scene-specific visual prompt for the image generation model.
+        Incorporates art style, environment, persistent character visual traits,
+        character actions, facial expressions, lighting, and child-safe quality cues.
         """
-        if scene.get("enriched_image_prompt"):
+        # If prompt was already enriched and scene was not edited/marked outdated, reuse it
+        if scene.get("enriched_image_prompt") and scene.get("illustration_status") not in ("Pending", "Outdated"):
             return scene["enriched_image_prompt"]
 
-        chars_map = {c["name"].lower(): c for c in characters}
-        scene_chars = scene.get("characters_present", [])
-        
+        # Safely map characters (defensive against strings, ints, or missing keys)
+        chars_map = {}
+        for c in (characters or []):
+            if isinstance(c, dict) and "name" in c and c["name"]:
+                chars_map[str(c["name"]).strip().lower()] = c
+            elif isinstance(c, str) and c.strip():
+                chars_map[c.strip().lower()] = {
+                    "name": c.strip(),
+                    "appearance": f"cartoon character named {c.strip()}"
+                }
+
+        raw_chars = scene.get("characters_present", [])
+        if isinstance(raw_chars, str):
+            scene_chars = [c.strip() for c in raw_chars.split(",") if c.strip()]
+        elif isinstance(raw_chars, list):
+            scene_chars = [str(c).strip() for c in raw_chars if c]
+        else:
+            scene_chars = []
+
         char_descriptions = []
         for cname in scene_chars:
             matched = chars_map.get(cname.lower())
-            if matched:
-                char_descriptions.append(
-                    f"{matched['name']}: {matched['appearance']}"
-                )
+            if not matched:
+                for k, v in chars_map.items():
+                    if k in cname.lower() or cname.lower() in k:
+                        matched = v
+                        break
+            if matched and isinstance(matched, dict):
+                c_name = matched.get("name", cname)
+                c_app = matched.get("appearance", "cartoon character")
+                char_descriptions.append(f"{c_name} (Visual Appearance: {c_app})")
 
         style_descriptors = {
-            "Colorful 2D cartoon": "classic 2D animated cartoon, clean cel-shaded linework, rich flat colors, vibrant and whimsical",
-            "Storybook illustration": "charming storybook illustration, soft textured brush strokes, warm pastel tones, golden lighting",
-            "Anime-inspired illustration": "anime cartoon aesthetic, expressive eyes, vibrant cinematic lighting, crisp detailed artwork",
-            "Watercolor illustration": "delicate watercolor cartoon painting, soft fluid pigment washes, gentle paper texture, dreamy ambience",
+            "Colorful 2D cartoon": "classic 2D animated cartoon, clean cel-shaded linework, rich flat colors, vibrant and whimsical, storybook framing",
+            "Storybook illustration": "charming children's picture-book illustration, soft textured brush strokes, warm pastel tones, golden ambient lighting",
+            "Anime-inspired illustration": "vibrant anime cartoon aesthetic, expressive eyes, dynamic cinematic lighting, crisp detailed artwork",
+            "Watercolor illustration": "delicate watercolor cartoon painting, soft fluid pigment washes, gentle paper texture, dreamy whimsical ambience",
             "3D animated-film-inspired illustration": "3D animated feature film CGI style, smooth ambient lighting, tactile materials, depth of field"
         }
 
         chosen_style = style_descriptors.get(art_style, f"{art_style} style cartoon illustration")
-        
+
+        heading = scene.get("heading") or scene.get("scene_title", "")
+        env = scene.get("environment") or scene.get("setting", "storybook setting")
+        action = scene.get("character_actions") or scene.get("image_prompt") or scene.get("narration", "")
+
         parts = [
-            f"Children's cartoon illustration in {chosen_style}.",
-            f"Scene: {scene.get('heading', '')}.",
-            f"Environment & Setting: {scene.get('environment', '')}."
+            f"Children's cartoon storybook illustration in {chosen_style}.",
+            f"Scene title: {heading}.",
+            f"Setting & Backdrop: {env}."
         ]
-        
+
         if char_descriptions:
-            parts.append("Characters: " + "; ".join(char_descriptions) + ".")
-            
-        parts.append(f"Visual Action: {scene.get('image_prompt', scene.get('narration', ''))}.")
-        parts.append("Family-friendly, engaging expressions, vibrant colors, clear focal point, cinematic composition, no watermark, no text.")
-        
-        return " ".join(parts)
+            parts.append("Characters with persistent design: " + "; ".join(char_descriptions) + ".")
+
+        if scene.get("character_actions"):
+            parts.append(f"Character action: {scene['character_actions']}.")
+        if scene.get("emotional_tone"):
+            parts.append(f"Emotional atmosphere: {scene['emotional_tone']}.")
+        if scene.get("lighting"):
+            parts.append(f"Lighting: {scene['lighting']}.")
+        if scene.get("important_objects"):
+            objs = scene["important_objects"]
+            if isinstance(objs, list):
+                parts.append(f"Key objects: {', '.join(str(o) for o in objs)}.")
+
+        parts.append(f"Visual Action: {action}.")
+        parts.append(
+            "Clear visual hierarchy, primary character in focus, family-friendly, expressive faces, vibrant palette, "
+            "clean artwork, charming composition, no watermark, no text, no captions, no logos, no artist signatures, no borders."
+        )
+
+        prompt = " ".join(parts)
+        scene["enriched_image_prompt"] = prompt
+        return prompt
 
     def generate_single_scene_image(
         self,

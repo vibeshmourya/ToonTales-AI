@@ -74,6 +74,8 @@ class PDFStorybookGenerator:
         """
         Builds and saves the complete illustrated PDF storybook.
         """
+        if not output_path or not str(output_path).strip():
+            raise ValueError("output_path cannot be empty. Please specify a destination filepath.")
         dest = Path(output_path)
         dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -161,6 +163,13 @@ class PDFStorybookGenerator:
                 if val is None:
                     val = item.get("scene_id")
                 formatted.append(str(val) if val is not None and str(val).strip() else "?")
+            elif isinstance(item, (list, tuple)) and item:
+                # If tuple of (scene_num, error_message)
+                first = item[0]
+                if isinstance(first, (int, str)) and str(first).strip():
+                    formatted.append(str(first).strip())
+                else:
+                    formatted.append("?")
             else:
                 formatted.append("?")
         return ", ".join(formatted)
@@ -343,10 +352,21 @@ class PDFStorybookGenerator:
             return
 
         for char in characters:
-            name = char.get("name", "Character")
-            role = char.get("role", "Character")
-            appearance = char.get("appearance", "A colorful cartoon character.")
-            personality = char.get("personality", "Friendly and brave.")
+            if isinstance(char, dict):
+                name = char.get("name", "Character")
+                role = char.get("role", "Character")
+                appearance = char.get("appearance", "A colorful cartoon character.")
+                personality = char.get("personality", "Friendly and brave.")
+            elif isinstance(char, str):
+                name = char
+                role = "Character"
+                appearance = f"A cartoon character named {char}."
+                personality = "Friendly."
+            else:
+                name = f"Character {str(char)}"
+                role = "Character"
+                appearance = "A colorful cartoon character."
+                personality = "Friendly."
 
             char_text = (
                 f"<b>{name}</b> ({role})<br/>"
@@ -377,11 +397,18 @@ class PDFStorybookGenerator:
         total_scenes = len(scenes)
 
         for idx, scene in enumerate(scenes):
-            scene_num = scene.get("scene_number", idx + 1)
-            heading = scene.get("heading", f"Scene {scene_num}")
-            narration = scene.get("narration", "")
-            environment = scene.get("environment", "")
-            image_path = scene.get("image_path")
+            if isinstance(scene, dict):
+                scene_num = scene.get("scene_number", idx + 1)
+                heading = scene.get("heading") or scene.get("scene_title") or f"Scene {scene_num}"
+                narration = scene.get("narration") or scene.get("narrative_text") or ""
+                environment = scene.get("environment") or scene.get("setting") or ""
+                image_path = scene.get("image_path")
+            else:
+                scene_num = idx + 1
+                heading = f"Scene {scene_num}"
+                narration = str(scene)
+                environment = ""
+                image_path = None
 
             elements.append(Spacer(1, 10))
 

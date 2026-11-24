@@ -1,7 +1,7 @@
 """
 ToonTales AI — Cost and Usage Tracking Service
 Transparently logs provider calls, token usage, image counts, and reported/estimated costs.
-Never displays misleading 'free' labels.
+Never displays misleading 'free' labels. Resilient to missing fields and non-numeric values.
 """
 
 import threading
@@ -13,6 +13,26 @@ logger = logging.getLogger("ToonTalesAI.UsageTracker")
 
 _LOCK = threading.Lock()
 _USAGE_LOGS: List[Dict[str, Any]] = []
+
+
+def safe_int(val: Any, default: int = 0) -> int:
+    """Safely converts an arbitrary value to int, avoiding ValueErrors."""
+    if val is None or isinstance(val, bool):
+        return default
+    try:
+        return int(float(val))
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_float(val: Any, default: float = 0.0) -> float:
+    """Safely converts an arbitrary value to float, avoiding ValueErrors."""
+    if val is None or isinstance(val, bool):
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
 
 
 def create_usage_summary() -> Dict[str, Any]:
@@ -30,6 +50,7 @@ def create_usage_summary() -> Dict[str, Any]:
         "failed_stories": 0,
         "total_tokens": 0,
         "estimated_cost_usd": 0.0,
+        "cache_hits": 0,
     }
 
 
@@ -55,15 +76,11 @@ class UsageTracker:
         op_clean = (operation or "UNKNOWN").capitalize()
         status_clean = (status or "success").capitalize()
 
-        # Safely handle non-numeric or mock inputs
-        is_num_tokens = isinstance(tokens, (int, float)) and not isinstance(tokens, bool)
-        clean_tokens = int(tokens) if is_num_tokens else 0
-
-        is_num_images = isinstance(images_count, (int, float)) and not isinstance(images_count, bool)
-        clean_images = int(images_count) if is_num_images else 0
-
-        is_num_cost = isinstance(estimated_cost, (int, float)) and not isinstance(estimated_cost, bool)
-        clean_cost = float(estimated_cost) if is_num_cost else None
+        clean_tokens = safe_int(tokens, default=0)
+        clean_images = safe_int(images_count, default=0)
+        clean_cost = safe_float(estimated_cost, default=-1.0)
+        if clean_cost < 0:
+            clean_cost = None
 
         # Automatic cost estimation fallback if not explicitly provided
         final_cost = clean_cost
@@ -75,7 +92,7 @@ class UsageTracker:
             elif prov_clean == "OPENAI" and op_clean == "Image":
                 final_cost = 0.04 * clean_images if "dall-e-3" in str(model).lower() else 0.02 * clean_images
                 final_cost_type = "estimated"
-            elif is_num_tokens and clean_tokens > 0:
+            elif clean_tokens > 0:
                 # Approximate 0.50 USD per 1M tokens as conservative default if unknown
                 final_cost = round(clean_tokens * 0.0000005, 6)
                 final_cost_type = "estimated"
@@ -101,12 +118,15 @@ class UsageTracker:
     def record_usage_obj(usage: Optional[GenerationUsage], status: str = "success") -> None:
         if not usage:
             return
+        tokens_val = usage.total_tokens
+        if tokens_val is None:
+            tokens_val = (usage.prompt_tokens or 0) + (usage.completion_tokens or 0)
         UsageTracker.record(
             provider=usage.provider,
             model=usage.model,
             operation=usage.operation,
             status=status,
-            tokens=usage.total_tokens or ((usage.prompt_tokens or 0) + (usage.completion_tokens or 0)),
+            tokens=tokens_val,
             images_count=usage.images_generated,
             estimated_cost=usage.estimated_cost_usd,
             cost_type=usage.cost_type
@@ -129,18 +149,27 @@ class UsageTracker:
         Calculates and returns the aggregated usage summary.
         Guarantees presence of all standard fields:
         total_requests, total_images, successful_images, failed_images,
-        total_stories, successful_stories, failed_stories, total_tokens, estimated_cost_usd.
+        total_stories, successful_stories, failed_stories, total_tokens, estimated_cost_usd, cache_hits.
         """
         with _LOCK:
             summary = create_usage_summary()
             summary["total_requests"] = len(_USAGE_LOGS)
 
+            try:
+                from services.cache_service import RequestCache
+                summary["cache_hits"] = RequestCache.get_cache_stats().get("total_hits", 0)
+            except Exception:
+                summary["cache_hits"] = 0
+
             for entry in _USAGE_LOGS:
+                if not isinstance(entry, dict):
+                    continue
+
                 op = str(entry.get("operation", "")).lower()
                 status = str(entry.get("status", "")).lower()
-                tokens = int(entry.get("tokens") or 0)
-                images = int(entry.get("images") or 0)
-                cost = float(entry.get("estimated_cost") or 0.0)
+                tokens = safe_int(entry.get("tokens"), 0)
+                images = safe_int(entry.get("images"), 0)
+                cost = safe_float(entry.get("estimated_cost"), 0.0)
 
                 summary["total_tokens"] += tokens
                 summary["estimated_cost_usd"] += cost
@@ -161,4 +190,4 @@ class UsageTracker:
             return summary
 
 
-__all__ = ["UsageTracker", "create_usage_summary"]
+__all__ = ["UsageTracker", "create_usage_summary", "safe_int", "safe_float"]

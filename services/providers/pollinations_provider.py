@@ -96,19 +96,20 @@ class PollinationsProvider(BaseImageProvider):
         key = api_key or self._api_key or get_config("POLLINATIONS_API_KEY")
         selected_model = model or get_config("POLLINATIONS_IMAGE_MODEL", "flux")
 
-        encoded_prompt = urllib.parse.quote(prompt[:350])
+        encoded_prompt = urllib.parse.quote(prompt[:800])
         headers = {"User-Agent": "ToonTalesAI/1.0"}
 
         # Candidate URLs in priority order:
         # 1. gen.pollinations.ai with Bearer auth (if key present)
         # 2. image.pollinations.ai open tier
+        # Both pass &nologo=true&nofeed=true for clean, watermark-free cartoon illustrations.
         urls_to_try = []
         if key:
             headers["Authorization"] = f"Bearer {key}"
-            model_query = f"?model={urllib.parse.quote(selected_model)}&width={size[0]}&height={size[1]}&nologo=true"
+            model_query = f"?model={urllib.parse.quote(selected_model)}&width={size[0]}&height={size[1]}&nologo=true&nofeed=true"
             urls_to_try.append(("gen.pollinations.ai", f"https://gen.pollinations.ai/image/{encoded_prompt}{model_query}"))
 
-        open_query = f"?width={size[0]}&height={size[1]}&nologo=true"
+        open_query = f"?width={size[0]}&height={size[1]}&nologo=true&nofeed=true"
         if selected_model != "flux":
             open_query += f"&model={urllib.parse.quote(selected_model)}"
         urls_to_try.append(("image.pollinations.ai", f"https://image.pollinations.ai/prompt/{encoded_prompt}{open_query}"))
