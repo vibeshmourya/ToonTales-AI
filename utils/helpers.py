@@ -10,7 +10,8 @@ import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional
+import io
+from typing import Dict, Any, Optional, Tuple
 from PIL import Image
 from dotenv import load_dotenv
 
@@ -132,3 +133,33 @@ def validate_image_file(image_path: str) -> bool:
     except Exception as e:
         logger.warning(f"Image validation failed for {image_path}: {e}")
         return False
+
+
+def validate_image_bytes(
+    image_bytes: bytes,
+    min_width: int = 256,
+    min_height: int = 256
+) -> Tuple[bool, Optional[str]]:
+    """
+    Validates decoded image bytes for integrity, minimum dimensions, and non-uniformity.
+    Rejects empty, corrupt, tiny, or single-color placeholder responses.
+    """
+    if not image_bytes or not isinstance(image_bytes, bytes):
+        return False, "Empty or non-bytes image payload."
+    if len(image_bytes) < 500:
+        return False, f"Image payload too small ({len(image_bytes)} bytes) to be valid image data."
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            w, h = img.size
+            if w < min_width or h < min_height:
+                return False, f"Image dimensions ({w}x{h}) smaller than required ({min_width}x{min_height})."
+
+            # Check for degenerate solid color images (e.g. solid black, white, gray placeholders)
+            grayscale = img.convert("L")
+            extrema = grayscale.getextrema()
+            if extrema[0] == extrema[1]:
+                return False, "Generated image is a uniform solid-color block (placeholder/blank)."
+
+            return True, None
+    except Exception as e:
+        return False, f"Pillow failed to decode image bytes: {e}"

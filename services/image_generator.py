@@ -4,7 +4,7 @@ Supports:
 1. Pollinations AI (Recommended default: zero-cost cloud diffusion or authenticated gen.pollinations.ai)
 2. Google Gemini Developer API (gemini-2.5-flash-image)
 3. OpenAI DALL-E (dall-e-3, dall-e-2)
-4. OpenRouter image-capable models (e.g. stabilityai/stable-diffusion-xl-base-1.0)
+4. OpenRouter image-capable models (e.g. recraft/recraft-v4.1-flash-v2:free, microsoft/mai-image-2.7-flash)
 
 Features:
 - Independent provider and model configuration
@@ -43,9 +43,37 @@ from services.providers import (
 )
 from services.rate_limit_service import RateLimitService
 from services.usage_tracker import UsageTracker
-from utils.helpers import get_config, mask_secret, validate_image_file
+from utils.helpers import get_config, mask_secret, validate_image_file, validate_image_bytes
 
 logger = logging.getLogger("ToonTalesAI.ImageGenerator")
+
+
+# =====================================================================
+# Species Anatomy Guards
+# =====================================================================
+
+def get_species_guard(text: str) -> str:
+    """
+    Returns anatomical guard cues to prevent diffusion models from misrepresenting species.
+    For example, ensures snakes remain limbless serpents and do not grow lizard legs.
+    """
+    t = text.lower()
+    guards = []
+    if any(k in t for k in ["snake", "serpent", "python", "cobra", "viper"]):
+        guards.append("limbless serpent, long tubular snake body, smooth scales, strictly NO arms, strictly NO legs, strictly NO lizard limbs, NOT a lizard, NOT a crocodile, NOT a dragon")
+    if any(k in t for k in ["squirrel", "chipmunk"]):
+        guards.append("small woodland rodent, large bushy fluffy tail, tiny paws, small rounded ears")
+    if any(k in t for k in ["rabbit", "bunny", "hare"]):
+        guards.append("long upright bunny ears, soft fur, small twitchy nose, short fluffy cotton-tail")
+    if any(k in t for k in ["bear"]):
+        guards.append("chubby rounded bear body, round ears, short tail")
+    if any(k in t for k in ["fox"]):
+        guards.append("slender canid, pointed upright ears, sharp snout, large bushy white-tipped tail")
+    if any(k in t for k in ["bird", "owl", "sparrow", "eagle", "parrot"]):
+        guards.append("feathered avian body, two wings, beak, two bird feet, strictly NO four legs")
+    if any(k in t for k in ["fish"]):
+        guards.append("aquatic fish body, fins, gills, scales, fish tail, strictly NO legs, strictly NO arms")
+    return "; ".join(guards)
 
 
 # =====================================================================
@@ -79,7 +107,7 @@ class ImageGeneratorService:
         :param pollinations_api_key: Optional key specifically for Pollinations AI
         :param pollinations_model: Optional model for Pollinations AI
         """
-        self.provider_name = (provider or get_config("IMAGE_PROVIDER", "pollinations")).lower()
+        self.provider_name = (provider or get_config("IMAGE_PROVIDER", "gemini")).lower()
         self.api_key = api_key
         self.model_name = model_name
         self.pollinations_api_key = pollinations_api_key or get_config("POLLINATIONS_API_KEY")
@@ -132,15 +160,22 @@ class ImageGeneratorService:
         art_style: str = "Colorful 2D cartoon"
     ) -> str:
         """
-        Constructs an optimized, scene-specific visual prompt for the image generation model.
-        Incorporates art style, environment, persistent character visual traits,
-        character actions, facial expressions, lighting, and child-safe quality cues.
+        Constructs an optimized, character-first visual prompt for the image generation model.
+        Enforces character primacy: characters and their exact actions lead the prompt to ensure
+        diffusion attention prioritizes the subjects rather than creating an empty landscape.
+        Embeds species anatomy guards (e.g. limbless serpent for snakes, no lizard legs).
         """
-        # If prompt was already enriched and scene was not edited/marked outdated, reuse it
-        if scene.get("enriched_image_prompt") and scene.get("illustration_status") not in ("Pending", "Outdated"):
-            return scene["enriched_image_prompt"]
+        # If prompt was already enriched with character primacy and scene was not edited, reuse it
+        existing_prompt = scene.get("enriched_image_prompt")
+        if (
+            existing_prompt
+            and scene.get("illustration_status") not in ("Pending", "Outdated")
+            and not existing_prompt.startswith("Children's cartoon storybook illustration in")
+            and not existing_prompt.startswith("Cartoon storybook illustration in")
+        ):
+            return existing_prompt
 
-        # Safely map characters (defensive against strings, ints, or missing keys)
+        # Safely map characters (defensive against strings, dicts, or missing keys)
         chars_map = {}
         for c in (characters or []):
             if isinstance(c, dict) and "name" in c and c["name"]:
@@ -148,7 +183,9 @@ class ImageGeneratorService:
             elif isinstance(c, str) and c.strip():
                 chars_map[c.strip().lower()] = {
                     "name": c.strip(),
-                    "appearance": f"cartoon character named {c.strip()}"
+                    "role": "Character",
+                    "appearance": f"cartoon character named {c.strip()}",
+                    "species": c.strip()
                 }
 
         raw_chars = scene.get("characters_present", [])
@@ -159,7 +196,38 @@ class ImageGeneratorService:
         else:
             scene_chars = []
 
-        char_descriptions = []
+        # FALLBACK 1: If scene_chars is empty, scan narration, heading, and action for character names
+        if not scene_chars:
+            scene_search_text = f"{scene.get('heading', '')} {scene.get('narration', '')} {scene.get('character_actions', '')} {scene.get('image_prompt', '')}".lower()
+            for cname, cdata in chars_map.items():
+                if cname in scene_search_text:
+                    scene_chars.append(cdata.get("name", cname))
+
+        # FALLBACK 2: If still empty, default to the protagonist (first character)
+        if not scene_chars and characters:
+            first_c = characters[0]
+            if isinstance(first_c, dict):
+                scene_chars.append(first_c.get("name", "Protagonist"))
+            elif isinstance(first_c, str):
+                scene_chars.append(first_c)
+
+        style_descriptors = {
+            "Colorful 2D cartoon": "classic 2D animated cartoon, clean cel-shaded linework, rich flat colors, vibrant and whimsical, storybook framing",
+            "Storybook illustration": "charming storybook illustration, children's picture-book style, soft textured brush strokes, warm pastel tones, golden ambient lighting",
+            "Anime-inspired illustration": "vibrant anime cartoon aesthetic, expressive eyes, dynamic cinematic lighting, crisp detailed artwork",
+            "Watercolor illustration": "delicate watercolor cartoon painting, soft fluid pigment washes, gentle paper texture, dreamy whimsical ambience",
+            "3D animated-film-inspired illustration": "3D animated feature film CGI style, smooth ambient lighting, tactile materials, depth of field"
+        }
+        chosen_style = style_descriptors.get(art_style, f"{art_style} style cartoon illustration")
+
+        heading = scene.get("heading") or scene.get("scene_title", "")
+        env = scene.get("environment") or scene.get("setting", "storybook setting")
+        action = scene.get("character_actions") or scene.get("image_prompt") or scene.get("narration", "exploring")
+        tone = scene.get("emotional_tone") or "cheerful and adventurous"
+        lighting = scene.get("lighting") or "bright whimsical daylight"
+
+        hero_char_summaries = []
+        char_detail_blocks = []
         for cname in scene_chars:
             matched = chars_map.get(cname.lower())
             if not matched:
@@ -170,49 +238,47 @@ class ImageGeneratorService:
             if matched and isinstance(matched, dict):
                 c_name = matched.get("name", cname)
                 c_app = matched.get("appearance", "cartoon character")
-                char_descriptions.append(f"{c_name} (Visual Appearance: {c_app})")
+                c_role = matched.get("role", "character")
+                c_species = matched.get("species", "")
 
-        style_descriptors = {
-            "Colorful 2D cartoon": "classic 2D animated cartoon, clean cel-shaded linework, rich flat colors, vibrant and whimsical, storybook framing",
-            "Storybook illustration": "charming children's picture-book illustration, soft textured brush strokes, warm pastel tones, golden ambient lighting",
-            "Anime-inspired illustration": "vibrant anime cartoon aesthetic, expressive eyes, dynamic cinematic lighting, crisp detailed artwork",
-            "Watercolor illustration": "delicate watercolor cartoon painting, soft fluid pigment washes, gentle paper texture, dreamy whimsical ambience",
-            "3D animated-film-inspired illustration": "3D animated feature film CGI style, smooth ambient lighting, tactile materials, depth of field"
-        }
+                species_guard = get_species_guard(f"{c_name} {c_app} {c_species}")
+                guard_str = f" [{species_guard}]" if species_guard else ""
 
-        chosen_style = style_descriptors.get(art_style, f"{art_style} style cartoon illustration")
+                hero_char_summaries.append(f"{c_name} ({c_app})")
+                char_detail_blocks.append(f"{c_name} ({c_role}): {c_app}{guard_str}")
+            else:
+                species_guard = get_species_guard(cname)
+                guard_str = f" [{species_guard}]" if species_guard else ""
+                hero_char_summaries.append(f"{cname}")
+                char_detail_blocks.append(f"{cname} (character): cartoon {cname}{guard_str}")
 
-        heading = scene.get("heading") or scene.get("scene_title", "")
-        env = scene.get("environment") or scene.get("setting", "storybook setting")
-        action = scene.get("character_actions") or scene.get("image_prompt") or scene.get("narration", "")
+        char_hero_text = " and ".join(hero_char_summaries) if hero_char_summaries else "the story characters"
 
-        parts = [
-            f"Children's cartoon storybook illustration in {chosen_style}.",
-            f"Scene title: {heading}.",
-            f"Setting & Backdrop: {env}."
+        # Construct Character-Primacy Prompt Template
+        prompt_parts = [
+            # 1. HERO OPENING: Characters and action FIRST!
+            f"{chosen_style} children's picture-book illustration of {char_hero_text} {action}.",
+            # 2. PRIMARY CHARACTERS & ANATOMY GUARDS
+            f"PRIMARY CHARACTERS: {'; '.join(char_detail_blocks)}.",
+            # 3. SCENE ACTION & INTERACTION
+            f"SCENE ACTION & POSE: Characters actively engaged in: {action}. Facial expressions: {tone}.",
+            # 4. ENVIRONMENT & BACKGROUND (after characters)
+            f"ENVIRONMENT & SETTING: Background environment is {env}. Scene title context: {heading}. Lighting: {lighting}.",
         ]
 
-        if char_descriptions:
-            parts.append("Characters with persistent design: " + "; ".join(char_descriptions) + ".")
-
-        if scene.get("character_actions"):
-            parts.append(f"Character action: {scene['character_actions']}.")
-        if scene.get("emotional_tone"):
-            parts.append(f"Emotional atmosphere: {scene['emotional_tone']}.")
-        if scene.get("lighting"):
-            parts.append(f"Lighting: {scene['lighting']}.")
         if scene.get("important_objects"):
             objs = scene["important_objects"]
-            if isinstance(objs, list):
-                parts.append(f"Key objects: {', '.join(str(o) for o in objs)}.")
+            if isinstance(objs, list) and objs:
+                prompt_parts.append(f"KEY OBJECTS: {', '.join(str(o) for o in objs)}.")
 
-        parts.append(f"Visual Action: {action}.")
-        parts.append(
-            "Clear visual hierarchy, primary character in focus, family-friendly, expressive faces, vibrant palette, "
-            "clean artwork, charming composition, no watermark, no text, no captions, no logos, no artist signatures, no borders."
-        )
+        prompt_parts.extend([
+            # 5. COMPOSITION & FRAMING
+            "COMPOSITION: Characters are large, centered, and prominent in the foreground and midground with clear focal point. Storybook picture-book framing, not an empty landscape.",
+            # 6. NEGATIVE PROMPT / EXCLUSIONS
+            "EXCLUSIONS: No empty landscape without characters, no missing characters, no incorrect animal anatomy, no lizard legs on snake, no dinosaur, no text, no captions, no watermarks, no logos, no artist signatures, no borders."
+        ])
 
-        prompt = " ".join(parts)
+        prompt = " ".join(prompt_parts)
         scene["enriched_image_prompt"] = prompt
         return prompt
 
@@ -297,6 +363,14 @@ class ImageGeneratorService:
                     model=chosen_model,
                     size=(512, 512),
                     api_key=api_key_override or self.api_key
+                )
+
+            # Validate decoded image bytes before processing or saving
+            is_valid, val_err = validate_image_bytes(image_bytes)
+            if not is_valid:
+                raise ProviderError(
+                    f"Generated image failed byte-level integrity validation: {val_err}",
+                    provider=provider_key
                 )
 
             # Validate the bytes with Pillow before saving

@@ -73,6 +73,15 @@ class QuotaExceededError(RateLimitError):
 
 class ModelNotFoundError(ProviderError):
     """Raised when a requested model is not found, deprecated, or unavailable (HTTP 404)."""
+    def __init__(
+        self,
+        message: str,
+        provider: str = "unknown",
+        model: Optional[str] = None,
+        raw_error: Optional[Exception] = None
+    ):
+        super().__init__(message, provider=provider, raw_error=raw_error)
+        self.model = model
     pass
 
 

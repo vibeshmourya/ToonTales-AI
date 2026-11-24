@@ -45,9 +45,10 @@ def sample_scene():
     }
 
 
-def _create_fake_png_bytes(color: str = "purple", size: tuple = (100, 100)) -> bytes:
-    """Helper to create valid PNG bytes."""
+def _create_fake_png_bytes(color: str = "purple", size: tuple = (256, 256)) -> bytes:
+    """Helper to create valid PNG bytes with variation."""
     img = Image.new("RGB", size, color=color)
+    img.putpixel((0, 0), (255, 255, 255))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
@@ -145,7 +146,6 @@ def test_quota_exhausted_zero_quota(sample_scene, sample_character):
             service._generate_with_gemini("Draw dragon")
         assert excinfo.value.is_zero_quota is True
         assert "0 free-tier quota" in str(excinfo.value)
-        assert "Pollinations AI" in str(excinfo.value)
 
 
 def test_quota_exhausted_rate_limit_with_retry_delay(sample_scene, sample_character):
@@ -343,7 +343,7 @@ def test_scene_to_image_association(tmp_path, sample_character):
 def test_generate_with_pollinations_mock(tmp_path, sample_scene, sample_character):
     """Test pollinations provider dispatch with mocked requests response."""
     service = ImageGeneratorService(provider="pollinations")
-    fake_bytes = _create_fake_png_bytes("blue", (64, 64))
+    fake_bytes = _create_fake_png_bytes("blue", (256, 256))
     out_file = str(tmp_path / "test_poll_01.png")
 
     with patch("services.image_generator.requests.get") as mock_get:
@@ -369,7 +369,7 @@ def test_generate_with_pollinations_mock(tmp_path, sample_scene, sample_characte
 def test_pollinations_authenticated_bearer_header(sample_scene, sample_character):
     """Test that pollinations uses Authorization Bearer header when API key is provided."""
     service = ImageGeneratorService(provider="pollinations", pollinations_api_key="secret_test_key_123")
-    fake_bytes = _create_fake_png_bytes("green", (64, 64))
+    fake_bytes = _create_fake_png_bytes("green", (256, 256))
 
     with patch("services.image_generator.requests.get") as mock_get:
         mock_response = MagicMock()
@@ -451,7 +451,7 @@ def test_invalid_image_data_fails_validation(tmp_path, sample_scene, sample_char
 def test_regeneration_of_single_scene_workflow(tmp_path, sample_scene, sample_character):
     """Test regeneration lifecycle: Pending -> Generating -> Generated."""
     service = ImageGeneratorService(provider="pollinations")
-    fake_bytes = _create_fake_png_bytes("gold", (80, 80))
+    fake_bytes = _create_fake_png_bytes("gold", (256, 256))
     out_file = str(tmp_path / "regen_scene.png")
 
     sample_scene["illustration_status"] = "Pending"
@@ -474,8 +474,8 @@ def test_regeneration_of_single_scene_workflow(tmp_path, sample_scene, sample_ch
 def test_scene_description_editing_marks_pending(tmp_path, sample_scene, sample_character):
     """Test when scene description is edited or pasted, status is set to Pending and can regenerate."""
     service = ImageGeneratorService(provider="pollinations")
-    fake_bytes_1 = _create_fake_png_bytes("blue", (60, 60))
-    fake_bytes_2 = _create_fake_png_bytes("red", (60, 60))
+    fake_bytes_1 = _create_fake_png_bytes("blue", (256, 256))
+    fake_bytes_2 = _create_fake_png_bytes("red", (256, 256))
     out_file = str(tmp_path / "edited_scene.png")
 
     # Initial generation
@@ -508,4 +508,69 @@ def test_scene_description_editing_marks_pending(tmp_path, sample_scene, sample_
         assert sample_scene["illustration_status"] == "Generated"
         assert sample_scene["image_path"] == new_path
         assert os.path.isfile(new_path)
+
+
+def test_character_primacy_snake_species_guard():
+    """
+    Test that construct_scene_prompt places characters and actions FIRST (Hero Opening),
+    applies strict species guards (limbless serpent, NO legs, NO lizard limbs for snake),
+    and appends negative exclusions to prevent empty landscapes.
+    """
+    service = ImageGeneratorService(provider="gemini", model_name="gemini-2.5-flash-image")
+    characters = [
+        {
+            "name": "Slinky",
+            "role": "Protagonist",
+            "appearance": "A bright green snake with yellow stripes, large shiny eyes, cheerful smile, tiny backpack.",
+            "species": "snake"
+        },
+        {
+            "name": "Sammy",
+            "role": "Best Friend",
+            "appearance": "A fluffy gray squirrel with a bushy tail, brown eyes, wearing a tiny acorn hat.",
+            "species": "squirrel"
+        }
+    ]
+    scene = {
+        "scene_number": 3,
+        "heading": "Crossing the River",
+        "narration": "Slinky swam across the bubbling river while Sammy paddled on a floating log.",
+        "character_actions": "Slinky swimming smoothly through clear river water, Sammy sitting atop a floating wooden log paddling with a stick",
+        "characters_present": ["Slinky", "Sammy"],
+        "environment": "A sparkling river flowing through a lush enchanted forest under bright sunlight",
+        "emotional_tone": "determined and adventurous",
+        "lighting": "golden afternoon sunlight with water ripples"
+    }
+
+    prompt = service.construct_scene_prompt(
+        scene=scene,
+        characters=characters,
+        art_style="Colorful 2D cartoon"
+    )
+
+    # 1. Hero opening must lead with characters and action FIRST
+    assert prompt.startswith("classic 2D animated cartoon") or "children's picture-book illustration of slinky" in prompt.lower()
+    hero_part = prompt.split("PRIMARY CHARACTERS:")[0]
+    assert "Slinky" in hero_part
+    assert "Sammy" in hero_part
+    assert "swimming" in hero_part
+
+    # 2. Species guard for snake must strictly enforce limbless anatomy
+    assert "limbless serpent" in prompt.lower()
+    assert "no legs" in prompt.lower()
+    assert "not a lizard" in prompt.lower()
+
+    # 3. Species guard for squirrel must be present
+    assert "bushy fluffy tail" in prompt.lower() or "squirrel" in prompt.lower()
+
+    # 4. Environment must appear AFTER characters
+    assert prompt.find("PRIMARY CHARACTERS:") < prompt.find("ENVIRONMENT & SETTING:")
+
+    # 5. Composition and Exclusions must forbid empty landscapes
+    assert "COMPOSITION:" in prompt
+    assert "not an empty landscape" in prompt.lower()
+    assert "EXCLUSIONS:" in prompt
+    assert "no empty landscape without characters" in prompt.lower()
+    assert "no lizard legs on snake" in prompt.lower()
+    assert "no watermarks" in prompt.lower()
 

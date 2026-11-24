@@ -24,8 +24,9 @@ from services.story_generator import StoryGeneratorService
 from services.providers.base import GenerationUsage, ProviderError, QuotaExceededError
 
 
-def _create_fake_png_bytes(color: str = "green", size: tuple = (64, 64)) -> bytes:
+def _create_fake_png_bytes(color: str = "green", size: tuple = (256, 256)) -> bytes:
     img = Image.new("RGB", size, color=color)
+    img.putpixel((0, 0), (255, 255, 255))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()

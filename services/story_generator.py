@@ -349,8 +349,27 @@ class StoryGeneratorService:
             else:
                 present_chars = []
 
-            # Collect visual descriptions for present characters
-            char_visual_snippets = []
+            # FALLBACK 1: If characters_present is empty, scan scene text for character names
+            if not present_chars:
+                search_text = f"{scene.get('heading', '')} {scene.get('narration', '')} {scene.get('character_actions', '')} {base_prompt}".lower()
+                for cname, cdata in characters_map.items():
+                    if cname in search_text:
+                        present_chars.append(cdata.get("name", cname))
+
+            # FALLBACK 2: If still empty, default to the story protagonist
+            if not present_chars and raw_characters:
+                first_c = raw_characters[0]
+                if isinstance(first_c, dict):
+                    present_chars.append(first_c.get("name", "Protagonist"))
+                elif isinstance(first_c, str):
+                    present_chars.append(first_c)
+
+            # Persist normalized characters_present onto scene dict
+            scene["characters_present"] = present_chars
+
+            # Collect visual descriptions and hero summaries for present characters
+            hero_char_summaries = []
+            char_detail_blocks = []
             for char_name in present_chars:
                 clean_name = char_name.strip().lower()
                 matched = characters_map.get(clean_name)
@@ -361,30 +380,43 @@ class StoryGeneratorService:
                             break
                 if matched and isinstance(matched, dict):
                     c_app = matched.get("appearance", "cartoon character")
-                    char_visual_snippets.append(
-                        f"{matched.get('name', char_name)} (Appearance: {c_app})"
-                    )
+                    c_role = matched.get("role", "character")
+                    hero_char_summaries.append(f"{matched.get('name', char_name)} ({c_app})")
+                    char_detail_blocks.append(f"{matched.get('name', char_name)} ({c_role}): {c_app}")
+                else:
+                    hero_char_summaries.append(char_name)
+                    char_detail_blocks.append(f"{char_name} (character)")
 
-            # Build enriched image prompt
+            char_hero_text = " and ".join(hero_char_summaries) if hero_char_summaries else "the story characters"
+            action = scene.get("character_actions") or base_prompt or "exploring the scene"
+            env = scene.get("environment") or scene.get("setting", "storybook meadow")
+            heading = scene.get("heading") or f"Scene {scene_num}"
+            tone = scene.get("emotional_tone") or "cheerful and adventurous"
+            lighting = scene.get("lighting") or "bright whimsical daylight"
+
+            # Build Character-Primacy Enriched Image Prompt
             enriched_parts = [
-                f"Cartoon storybook illustration in {art_style} style.",
-                f"Scene setting: {scene.get('environment') or scene.get('setting', 'storybook meadow')}.",
+                # 1. HERO OPENING: Characters and action FIRST
+                f"{art_style} children's picture-book illustration of {char_hero_text} {action}.",
+                # 2. PRIMARY CHARACTERS
+                f"PRIMARY CHARACTERS: {'; '.join(char_detail_blocks)}.",
+                # 3. SCENE ACTION & POSE
+                f"SCENE ACTION & POSE: Characters actively engaged in: {action}. Facial expressions: {tone}.",
+                # 4. ENVIRONMENT & SETTING
+                f"ENVIRONMENT & SETTING: Background environment is {env}. Scene title context: {heading}. Lighting: {lighting}.",
             ]
-            if char_visual_snippets:
-                enriched_parts.append(
-                    "Characters with persistent design: " + "; ".join(char_visual_snippets) + "."
-                )
-            if scene.get("character_actions"):
-                enriched_parts.append(f"Character action: {scene['character_actions']}.")
-            if scene.get("emotional_tone"):
-                enriched_parts.append(f"Mood and emotion: {scene['emotional_tone']}.")
-            if scene.get("lighting"):
-                enriched_parts.append(f"Lighting: {scene['lighting']}.")
 
-            enriched_parts.append(f"Visual scene: {base_prompt}")
-            enriched_parts.append(
-                "High quality cartoon art, vivid expressive faces, vibrant palette, clean lines, charming storybook composition, no text, no watermark, no logo."
-            )
+            if scene.get("important_objects"):
+                objs = scene["important_objects"]
+                if isinstance(objs, list) and objs:
+                    enriched_parts.append(f"KEY OBJECTS: {', '.join(str(o) for o in objs)}.")
+
+            enriched_parts.extend([
+                # 5. COMPOSITION & FRAMING
+                "COMPOSITION: Characters are large, centered, and prominent in the foreground and midground with clear focal point. Storybook picture-book framing, not an empty landscape.",
+                # 6. NEGATIVE PROMPT / EXCLUSIONS
+                "EXCLUSIONS: No empty landscape without characters, no missing characters, no incorrect animal anatomy, no lizard legs on snake, no dinosaur, no text, no captions, no watermarks, no logos, no artist signatures, no borders."
+            ])
 
             # Store the enriched prompt for the image generator
             scene["enriched_image_prompt"] = " ".join(enriched_parts)

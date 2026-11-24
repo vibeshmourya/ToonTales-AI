@@ -33,8 +33,9 @@ from services.rate_limit_service import RateLimitService
 from services.providers.base import GenerationUsage
 
 
-def _create_fake_png_bytes(color: str = "blue", size: tuple = (64, 64)) -> bytes:
+def _create_fake_png_bytes(color: str = "blue", size: tuple = (256, 256)) -> bytes:
     img = Image.new("RGB", size, color=color)
+    img.putpixel((0, 0), (255, 255, 255))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()

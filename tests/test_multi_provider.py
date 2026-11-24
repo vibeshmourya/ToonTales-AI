@@ -42,8 +42,9 @@ from services.pdf_generator import PDFStorybookGenerator
 from services.narration_service import VoiceNarrationService
 
 
-def _create_fake_png_bytes(color: str = "orange", size: tuple = (64, 64)) -> bytes:
+def _create_fake_png_bytes(color: str = "orange", size: tuple = (256, 256)) -> bytes:
     img = Image.new("RGB", size, color=color)
+    img.putpixel((0, 0), (255, 255, 255))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
@@ -201,7 +202,7 @@ def test_openrouter_image_provider_mock():
     }
 
     with patch("services.providers.openrouter_provider.requests.post", return_value=fake_http_resp):
-        img_bytes, usage = prov.generate_image("A magical meadow", model="stabilityai/stable-diffusion-xl-base-1.0")
+        img_bytes, usage = prov.generate_image("A magical meadow", model="recraft/recraft-v4.1-flash-v2:free")
         assert img_bytes == fake_png
         assert usage.provider == "openrouter"
 

@@ -288,7 +288,7 @@ if "story_provider_choice" not in st.session_state:
     st.session_state.story_provider_choice = get_config("STORY_PROVIDER", "gemini").lower()
 
 if "image_provider_choice" not in st.session_state:
-    st.session_state.image_provider_choice = get_config("IMAGE_PROVIDER", "pollinations").lower()
+    st.session_state.image_provider_choice = get_config("IMAGE_PROVIDER", "gemini").lower()
 
 if "last_quota_error" not in st.session_state:
     st.session_state.last_quota_error = None
@@ -414,12 +414,12 @@ with st.sidebar:
     # 2. IMAGE GENERATION PROVIDER
     # -------------------------------------------------------------
     st.markdown("#### 🎨 Illustration Generator")
-    img_providers = ["pollinations", "gemini", "openai", "openrouter"]
+    img_providers = ["gemini", "openai", "openrouter", "pollinations"]
     img_prov_labels = {
-        "pollinations": "Pollinations AI (Recommended - Zero Cost)",
-        "gemini": "Google Gemini (Multimodal)",
-        "openai": "OpenAI DALL-E",
-        "openrouter": "OpenRouter (Image Models)"
+        "gemini": "Google Gemini (Imagen 3 / Flash Image)",
+        "openai": "OpenAI DALL-E (dall-e-3, dall-e-2)",
+        "openrouter": "OpenRouter (Image Models)",
+        "pollinations": "Pollinations AI (Explicit Selection Only)"
     }
     current_img_prov = st.session_state.image_provider_choice
     def_img_prov_idx = img_providers.index(current_img_prov) if current_img_prov in img_providers else 0
@@ -430,38 +430,90 @@ with st.sidebar:
         index=def_img_prov_idx,
         format_func=lambda x: img_prov_labels.get(x, x.title()),
         help=(
-            "Pollinations AI provides free cloud diffusion and works reliably without requiring billing. "
-            "Gemini requires a Pay-As-You-Go project (free-tier image quota is 0). "
-            "OpenAI uses DALL-E. OpenRouter routes to diffusion models."
+            "Google Gemini uses Imagen 3 or Flash Image. "
+            "OpenAI uses DALL-E 3. "
+            "OpenRouter routes to open diffusion models. "
+            "Pollinations AI is available only when explicitly chosen."
         )
     )
     st.session_state.image_provider_choice = selected_image_provider
 
     # Dynamic Image Models
-    img_model_presets = {
-        "pollinations": ["flux", "turbo", "flux-realism", "flux-anime", "flux-3d"],
-        "gemini": ["gemini-2.5-flash-image", "gemini-3.1-flash-image", "Custom..."],
-        "openai": ["dall-e-3", "dall-e-2", "Custom..."],
-        "openrouter": ["stabilityai/stable-diffusion-xl-base-1.0", "black-forest-labs/flux-1-schnell", "Custom..."]
-    }
-    avail_img_models = img_model_presets.get(selected_image_provider, ["Custom..."])
-    env_img_model = get_config(f"{selected_image_provider.upper()}_IMAGE_MODEL", avail_img_models[0])
-    def_img_model_idx = avail_img_models.index(env_img_model) if env_img_model in avail_img_models else 0
+    if selected_image_provider == "openrouter":
+        from services.providers.openrouter_provider import OpenRouterProvider
 
-    selected_img_preset = st.selectbox(
-        f"{selected_image_provider.title()} Model",
-        options=avail_img_models,
-        index=def_img_model_idx,
-        help="Select the AI image generation model."
-    )
-    if selected_img_preset == "Custom...":
-        selected_image_model = st.text_input(
-            f"Enter Custom {selected_image_provider.title()} Image Model",
-            value=env_img_model if env_img_model not in avail_img_models else "",
-            placeholder="e.g. model-identifier"
-        ).strip()
+        opt_key = active_story_key if selected_story_provider == "openrouter" else get_config("OPENROUTER_API_KEY")
+
+        if "openrouter_discovered_models" not in st.session_state or st.session_state.get("openrouter_models_refresh"):
+            st.session_state.openrouter_models_refresh = False
+            try:
+                discovered = OpenRouterProvider.get_available_image_models(api_key=opt_key)
+                st.session_state.openrouter_discovered_models = discovered
+            except Exception as e:
+                logger.warning(f"Error fetching OpenRouter models: {e}")
+                st.session_state.openrouter_discovered_models = OpenRouterProvider.FALLBACK_IMAGE_MODELS
+
+        discovered_models = st.session_state.get("openrouter_discovered_models") or OpenRouterProvider.FALLBACK_IMAGE_MODELS
+        avail_img_models = [m["id"] for m in discovered_models] + ["Custom..."]
+        model_names_map = {m["id"]: m.get("name", m["id"]) for m in discovered_models}
+        model_names_map["Custom..."] = "Custom (Enter model ID)..."
+
+        env_img_model = get_config("OPENROUTER_IMAGE_MODEL", avail_img_models[0])
+        # Eradicate obsolete dead models from env/session defaults
+        if env_img_model == "stabilityai/stable-diffusion-xl-base-1.0" or "stabilityai" in env_img_model:
+            env_img_model = avail_img_models[0]
+
+        def_img_model_idx = avail_img_models.index(env_img_model) if env_img_model in avail_img_models else 0
+
+        c_mod, c_ref = st.columns([3, 1])
+        with c_mod:
+            selected_img_preset = st.selectbox(
+                "OpenRouter Image Model",
+                options=avail_img_models,
+                index=def_img_model_idx,
+                format_func=lambda x: f"{model_names_map.get(x, x)}" if x in model_names_map else x,
+                help="Select verified image generation model from the live OpenRouter catalog."
+            )
+        with c_ref:
+            st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            if st.button("🔄 Refresh", help="Re-query OpenRouter API for active image models", key="btn_refresh_openrouter"):
+                st.session_state.openrouter_models_refresh = True
+                OpenRouterProvider.get_available_image_models(api_key=opt_key, force_refresh=True)
+                st.rerun()
+
+        if selected_img_preset in ("Custom...", "Custom (Enter model ID)..."):
+            selected_image_model = st.text_input(
+                "Enter Custom OpenRouter Image Model",
+                value="",
+                placeholder="e.g. recraft/recraft-v4.1-flash-v2:free"
+            ).strip()
+        else:
+            selected_image_model = selected_img_preset
+
     else:
-        selected_image_model = selected_img_preset
+        img_model_presets = {
+            "gemini": ["imagen-3.0-generate-002", "imagen-3.0-fast-generate-001", "gemini-2.5-flash-image", "Custom..."],
+            "openai": ["dall-e-3", "dall-e-2", "Custom..."],
+            "pollinations": ["flux", "turbo", "flux-realism", "flux-anime", "flux-3d"]
+        }
+        avail_img_models = img_model_presets.get(selected_image_provider, ["Custom..."])
+        env_img_model = get_config(f"{selected_image_provider.upper()}_IMAGE_MODEL", avail_img_models[0])
+        def_img_model_idx = avail_img_models.index(env_img_model) if env_img_model in avail_img_models else 0
+
+        selected_img_preset = st.selectbox(
+            f"{selected_image_provider.title()} Model",
+            options=avail_img_models,
+            index=def_img_model_idx,
+            help="Select the AI image generation model."
+        )
+        if selected_img_preset == "Custom...":
+            selected_image_model = st.text_input(
+                f"Enter Custom {selected_image_provider.title()} Image Model",
+                value=env_img_model if env_img_model not in avail_img_models else "",
+                placeholder="e.g. model-identifier"
+            ).strip()
+        else:
+            selected_image_model = selected_img_preset
 
     selected_pollinations_model = selected_image_model if selected_image_provider == "pollinations" else "flux"
 
@@ -509,7 +561,7 @@ with st.sidebar:
         if selected_image_provider == "gemini":
             st.warning(
                 "⚠️ **Gemini Image Quota Notice:** Google AI Studio has 0 free-tier image quota. "
-                "A linked Google Cloud Billing project is required. Use 'Pollinations AI' for zero-cost generation."
+                "A linked Google Cloud Billing project is required to use native Gemini image models."
             )
 
     st.markdown("---")
@@ -1082,55 +1134,11 @@ if st.session_state.story_data is not None:
         # Display failure reason if failed
         if img_status == "Failed" and curr_scene.get("illustration_error"):
             st.error(f"**Illustration Error:** {curr_scene.get('illustration_error')}")
-
-        # Gemini Quota Exhaustion Helper & One-Click Recovery
-        if img_status == "Failed" and curr_scene.get("illustration_error") and ("quota" in curr_scene.get("illustration_error", "").lower() or "free-tier" in curr_scene.get("illustration_error", "").lower()):
-            st.warning(
-                "💡 **Google Gemini Quota Notice:** Google AI Studio allocates 0 free-tier quota for image models. "
-                "You can switch to **Pollinations AI** for zero-cost cloud diffusion."
-            )
-            if st.button("👉 Switch to Pollinations AI & Generate Illustration Now", type="primary", key=f"switch_to_poll_{curr_idx}", use_container_width=True):
-                st.session_state.image_provider_choice = "pollinations"
-                with st.spinner("Generating illustration via Pollinations AI..."):
-                    try:
-                        st.session_state.is_generating_image = True
-                        curr_scene["illustration_status"] = "Generating"
-                        img_service = ImageGeneratorService(
-                            provider="pollinations",
-                            pollinations_api_key=active_pollinations_key,
-                            pollinations_model=selected_pollinations_model
-                        )
-                        scene_num = curr_scene.get("scene_number", curr_idx + 1)
-                        dest_file = os.path.join(
-                            st.session_state.story_dir, f"scene_{scene_num:02d}.png"
-                        )
-                        new_img_path = img_service.generate_single_scene_image(
-                            scene=curr_scene,
-                            characters=story.get("characters", []),
-                            art_style=story.get("art_style", "Colorful 2D cartoon"),
-                            output_filepath=dest_file,
-                            provider_override="pollinations",
-                            pollinations_api_key_override=active_pollinations_key,
-                            pollinations_model_override=selected_pollinations_model
-                        )
-                        curr_scene["image_path"] = new_img_path
-                        curr_scene["illustration_status"] = "Generated"
-                        curr_scene["illustration_error"] = None
-                        
-                        if not st.session_state.pdf_path and st.session_state.story_dir:
-                            st.session_state.pdf_path = os.path.join(st.session_state.story_dir, "story.pdf")
-                        if st.session_state.pdf_path:
-                            pdf_svc = PDFStorybookGenerator()
-                            pdf_svc.generate_pdf(story, st.session_state.pdf_path)
-                        save_story_json(story, os.path.join(st.session_state.story_dir, "story.json"))
-                        st.success(f"Scene {curr_idx + 1} illustration generated via Pollinations AI!")
-                        st.rerun()
-                    except Exception as poll_err:
-                        curr_scene["illustration_status"] = "Failed"
-                        curr_scene["illustration_error"] = str(poll_err)
-                        st.error(f"Pollinations generation failed: {poll_err}")
-                    finally:
-                        st.session_state.is_generating_image = False
+            if "quota" in curr_scene.get("illustration_error", "").lower() or "free-tier" in curr_scene.get("illustration_error", "").lower():
+                st.warning(
+                    "💡 **Quota Notice:** The selected image provider's quota has been exhausted. "
+                    "You can update your API key or configure an alternative provider in the sidebar settings."
+                )
 
         # Narration Box
         st.markdown(

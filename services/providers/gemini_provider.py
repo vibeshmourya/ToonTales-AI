@@ -57,14 +57,15 @@ class GeminiProvider(BaseStoryProvider, BaseImageProvider):
                 "gemini-1.5-flash"
             ],
             image_models=[
-                "gemini-2.5-flash-image",
-                "gemini-3.1-flash-image"
+                "imagen-3.0-generate-002",
+                "imagen-3.0-fast-generate-001",
+                "gemini-2.5-flash-image"
             ],
             requires_api_key=True,
             api_key_env_var="GEMINI_API_KEY",
             default_text_model="gemini-2.5-flash",
-            default_image_model="gemini-2.5-flash-image",
-            pricing_info="Text models offer free-tier quota. Image models require Pay-As-You-Go Google Cloud billing (0 free requests)."
+            default_image_model="imagen-3.0-generate-002",
+            pricing_info="Google Imagen 3 generates high-quality, watermark-free illustrations via the Gemini API."
         )
 
     def _get_client(self, api_key: Optional[str] = None) -> genai.Client:
@@ -188,38 +189,68 @@ class GeminiProvider(BaseStoryProvider, BaseImageProvider):
         api_key: Optional[str] = None,
         reference_image_bytes: Optional[bytes] = None
     ) -> Tuple[bytes, Optional[GenerationUsage]]:
-        """Generates cartoon illustration via Gemini multimodal Developer API endpoint."""
+        """Generates cartoon illustration via Google Gemini Imagen 3 or multimodal Developer API endpoint."""
         client = self._get_client(api_key)
-        selected_model = model or get_config("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
-
-        if selected_model.startswith("imagen-"):
-            raise CapabilityError(
-                f"Model '{selected_model}' requires Gemini Enterprise Agent Platform mode and is not supported "
-                "with standard Google AI Studio API keys in the Gemini Developer API. "
-                "Please configure a Gemini Developer API image model such as 'gemini-2.5-flash-image'.",
-                provider="gemini"
-            )
+        selected_model = model or get_config("GEMINI_IMAGE_MODEL", "imagen-3.0-generate-002")
 
         try:
-            response = client.models.generate_content(
-                model=selected_model,
-                contents=[prompt],
-            )
-
             image_bytes = None
-            if hasattr(response, "parts") and response.parts:
-                for part in response.parts:
-                    if getattr(part, "inline_data", None) is not None:
-                        try:
-                            img = part.as_image()
-                            if img and getattr(img, "image_bytes", None):
-                                image_bytes = img.image_bytes
+
+            # Primary Path: Google Imagen 3 via client.models.generate_images
+            if selected_model.startswith("imagen-"):
+                neg_prompt = (
+                    "generic landscape without characters, missing main characters, missing animals, "
+                    "lizard legs on snake, dinosaur, dragon, text, watermark, logo, captions, signature, "
+                    "blurry, distorted anatomy, extra limbs, photo, realistic"
+                )
+                img_config = types.GenerateImagesConfig(
+                    number_of_images=1,
+                    output_mime_type="image/png",
+                    aspect_ratio="1:1",
+                    person_generation="ALLOW_ADULT",
+                    add_watermark=False,
+                    negative_prompt=neg_prompt
+                )
+                try:
+                    response = client.models.generate_images(
+                        model=selected_model,
+                        prompt=prompt,
+                        config=img_config
+                    )
+                    if hasattr(response, "generated_images") and response.generated_images:
+                        first_img = response.generated_images[0]
+                        if hasattr(first_img, "image") and getattr(first_img.image, "image_bytes", None):
+                            image_bytes = first_img.image.image_bytes
+                except ValueError as ve:
+                    if "Gemini Enterprise Agent Platform mode" in str(ve):
+                        raise ModelNotFoundError(
+                            f"Model '{selected_model}' via generate_images is only supported in Gemini Enterprise Agent Platform mode, not in Gemini Developer API mode. For Developer API keys, please use 'gemini-2.5-flash-image'.",
+                            provider="gemini",
+                            model=selected_model,
+                            raw_error=ve
+                        )
+                    raise
+
+            # Secondary Path: Multimodal chat image generation via generate_content (e.g. gemini-2.5-flash-image)
+            else:
+                response = client.models.generate_content(
+                    model=selected_model,
+                    contents=[prompt],
+                )
+
+                if hasattr(response, "parts") and response.parts:
+                    for part in response.parts:
+                        if getattr(part, "inline_data", None) is not None:
+                            try:
+                                img = part.as_image()
+                                if img and getattr(img, "image_bytes", None):
+                                    image_bytes = img.image_bytes
+                                    break
+                            except Exception:
+                                pass
+                            if getattr(part.inline_data, "data", None):
+                                image_bytes = part.inline_data.data
                                 break
-                        except Exception:
-                            pass
-                        if getattr(part.inline_data, "data", None):
-                            image_bytes = part.inline_data.data
-                            break
 
             if not image_bytes and hasattr(response, "candidates") and response.candidates:
                 for candidate in response.candidates:
@@ -279,8 +310,8 @@ class GeminiProvider(BaseStoryProvider, BaseImageProvider):
 
             if is_zero_quota:
                 raise QuotaExceededError(
-                    f"Google AI Studio project has 0 free-tier quota allocated for model '{model}'. "
-                    "Google Cloud billing (Pay-As-You-Go) is required, or switch provider to Pollinations AI.",
+                    f"Google AI Studio project quota exhausted (0 free-tier quota) for model '{model}'. "
+                    "Please verify your Google AI Studio plan and billing settings at https://aistudio.google.com/.",
                     provider="gemini",
                     retry_after=None,
                     is_zero_quota=True,
